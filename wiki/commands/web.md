@@ -7,6 +7,8 @@ updated: 2026-11-07
 tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-web) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
 **Rails 8** app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in
 `web/` at the repo root. It is the browser counterpart to the TUI over the same
@@ -163,15 +165,6 @@ healthy.
 
 Pre-dispatch argv failures distinguish `web status` from `web install` and use
 the matching versioned envelope with `error_kind: "invalid_task_path"`.
-
-## Output exceptions, serialization, and exit codes
-
-Foreground `hive web` is human-readable. Machine lifecycle modes emit
-`hive-web-status.v1` or `hive-web-install.v1`, including their matching typed
-error arms. Those documents are encoded directly: a JSON serialization failure
-propagates and no prose or fallback JSON document is emitted. Success exits `0`;
-an unready service or ordinary bootstrap/service failure exits `1`, invalid
-arguments exit `64`, and invalid web configuration exits `78`.
 
 ## Daily activity digest
 

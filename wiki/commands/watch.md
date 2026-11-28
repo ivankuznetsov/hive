@@ -7,6 +7,8 @@ updated: 2026-08-28
 tags: [command, watch, agents, status, jsonl, observability]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-watch) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive watch` is a bounded, read-only semantic observer for agents.
 It resolves explicit tasks from one exact-target status projection with
 authoritative dependency admission (or uses
@@ -15,15 +17,7 @@ event and only meaningful transitions, then emits a final event on the
 requested terminal condition, timeout, event cap, interruption, or source
 failure. It replaces shell polling loops; machine mode is JSON Lines.
 
-## Usage
-
-```bash
-hive watch PROJECT:SLUG
-hive watch SLUG --project PROJECT
-hive watch --project PROJECT
-hive watch PROJECT:ONE PROJECT:TWO --until completion
-hive watch PROJECT:SLUG --json-lines --interval 15 --timeout 1800 --max-events 100
-```
+## Selection and identity pinning
 
 Targets are either exact `PROJECT:SLUG` identities or bare slugs. A bare slug
 must resolve uniquely, with `--project` available to disambiguate. With no
@@ -47,11 +41,6 @@ projection recursively exact-loads only their dependency closure, so a valid
 completed prerequisite keeps its authoritative admission meaning and completion
 remains verifiable without rebuilding the fleet or loading unrelated archive
 rows.
-
-Defaults are `--interval 15`, `--timeout 1800`, `--max-events 100`, and
-`--until settled`. Interval/timeout must be positive finite numbers and the
-event cap a positive integer. The normal global `--json` document flag is
-rejected because watch is a stream; use `--json-lines`.
 
 ## Events
 
@@ -79,34 +68,19 @@ stops only when every target is verified archived. A row disappearing from
 both active and verified archive views emits warnings; three consecutive
 misses fail as `status_unavailable` rather than fabricating success.
 
-## Termination and exits
+## Deadline and failure boundaries
 
-Timeout and event-cap finals are bounded successful observations, not task
-success claims. The overall timeout bounds every status-source fetch, physical
-identity resolution, and poll sleep, so neither a blocked source nor task-path
-lookup can overrun the requested deadline or publish a late transition. A
-source's own timeout exception still counts against the source-failure budget;
-only Hive's private overall-deadline interrupt produces a successful `timeout`
-final. A
-same-identity row collision discovered after selection counts as a source
-failure rather than choosing one row. Three consecutive source failures emit a final
-`status_unavailable` event and fail the command. `SIGINT` and `SIGTERM` emit a
-final `interrupted`/`terminated` event and exit 130/143. A closed downstream
-pipe is handled cleanly. Initial selection/source errors fail before a useful
-stream can start.
+The overall timeout bounds every status-source fetch, physical identity
+resolution, and poll sleep through Hive's private `DeadlineExceeded` interrupt,
+so neither a blocked source nor task-path lookup can overrun the requested
+deadline or publish a late transition. A source's own timeout exception still
+counts against the three-poll source-failure budget; a same-identity row
+collision discovered after selection likewise counts as a source failure rather
+than choosing one row.
 
 The command never writes task state, claims a task lock, dispatches a stage,
 or calls a model. To execute a routine action, obtain the descriptor from a
 fresh `hive status --operational --json` snapshot and use `hive act`.
-
-Each JSON Lines event is encoded directly. A serialization failure is not
-replaced with a prose line or fallback JSON event; it remains a failed stream
-instead of publishing a misleading terminal observation.
-
-The stream schema is `hive-watch-event.v1`. A completed timeout, event cap, or
-requested terminal condition exits `0`; initial selection and repeated source
-failures exit non-zero, invalid arguments exit `64`, and signals exit `130` or
-`143` after their final event.
 
 ## Tests
 

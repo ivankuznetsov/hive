@@ -7,23 +7,9 @@ updated: 2026-08-28
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-tui) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
-
-## Usage and options
-
-Run `hive tui` in an interactive TTY. It has no command-specific options;
-`--json` is explicitly rejected because the dashboard is human-only.
-
-## Examples
-
-`hive tui` opens the fleet dashboard; press `?` after launch for the complete
-per-mode keybinding reference.
-
-## Output, schema, and serialization
-
-Successful TUI operation is human-readable terminal output with no JSON schema,
-so success serialization and a serialization fallback are not applicable. The
-schema-less `--json` refusal is emitted only by the wrapper error boundary.
 
 ## Backend
 
@@ -309,7 +295,6 @@ For other `REVIEW_STALE` rows (max passes with missing completion evidence or a 
 Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no reviewer files exist for the recorded pass — wall-clock can fire during Phase 1 CI-fix, before any reviewer ran. The pre-fix gate told the operator to "edit/rename highest-pass review files" but in that scenario there are no files to edit. Retry the run, and if wall-clock keeps firing, the operator's lever is `review.max_wall_clock_sec` in `<project>/.hive-state/config.yml`.
 
 Every `error` row follows one path: grid Enter opens red-status detail, and Enter in that view submits `RecoverError` through `Hive::Recovery::API` on a background worker. The TUI has no automatic recovery scheduler and gives signal exits `130` / `137` / `143` no private clear path; automatic retry belongs exclusively to the daemon. The status column shows `ERROR exit_code=N` (or `ERROR <reason>` when no exit code is set) so the operator can read why the agent failed without leaving the grid. Per-folder local dedup is tracked on `@error_recovery_inflight`; cross-process dedup and marker occurrence safety are coordinator-owned.
-
 
 `SUBPROCESS_LOG_PATH` (`$TMPDIR/hive-tui-subprocess.log`, or `$HIVE_TUI_LOG_DIR/hive-tui-subprocess.log` when the e2e harness scopes a run) is a marker-only log: BEGIN[id] / END[id] / ERRNO records, no child stdio. Each background spawn captures its own stdout/stderr to `hive-tui-spawn-<id>.log` in the same directory (the same 8-char hex ID embedded in the marker line). The reaper deletes the per-spawn capture on `exit_code == 0` (success has nothing to diagnose) and keeps a truncated failure capture on non-zero exits; `Messages::SubprocessExited` carries the spawn id so `Subprocess.diagnose_recent_failure(verb, spawn_id:)` reads the exact failed subprocess instead of whichever same-verb BEGIN marker is newest. Diagnosis starts with the last 64 KiB of marker lines and walks backward in 64 KiB increments up to 1 MiB before falling back to the generic exit-code flash; this keeps lookup bounded while tolerating bursts of concurrent marker traffic after a failed spawn. `SUBPROCESS_LOG_MAX_BYTES` (10 MiB) is checked at each stamp write — when exceeded the file is renamed to `…log.1` (single rotation tier). With child output redirected away from the shared file, that cap is now an actual disk-usage bound rather than the approximate ceiling it used to be. Per-spawn captures are reaped opportunistically: every BEGIN sweeps `hive-tui-spawn-*.log` in the active log directory and deletes anything older than 24 h so a crashed reaper or a `kill -9 hive` can't leak files.
 

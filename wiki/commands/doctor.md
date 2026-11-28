@@ -7,6 +7,8 @@ updated: 2026-11-26
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-doctor) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive doctor` is the read-only renderer for Hive's managed-skill
 inspector. It always checks Hive's own operating skill for supported Claude,
 Codex, and Pi agents, adds capabilities derived from project configuration,
@@ -19,21 +21,14 @@ Legacy Claude auth/config, QMD, and deprecated-config checks remain separate row
 runtime database or cutover manifest exists, Doctor also reports exact SQLite
 application/schema/integrity health without creating or migrating anything.
 
-## Usage
-
-```bash
-hive doctor
-hive doctor --json
-```
+## Runtime control-plane diagnosis
 
 Run from a Hive-initialized project. Doctor reads installed-package registries,
-config, cache paths, canonical manifests, and ClawHub origin/lock metadata. It
-does not launch Claude, Codex, Pi, or OpenClaw; invoke install/update commands;
-write aliases or skills; or call a model. An absent agent binary is an
-`unavailable`, non-blocking row. Legacy dependency checks remain bounded and
-separate from managed-agent inventory.
-
-## Runtime control-plane diagnosis
+config, cache paths, canonical manifests, and ClawHub origin/lock metadata
+without launching Claude, Codex, Pi, or OpenClaw, invoking install/update
+commands, writing aliases or skills, or calling a model. An absent agent binary
+is an `unavailable`, non-blocking row. Legacy dependency checks remain bounded
+and separate from managed-agent inventory.
 
 Doctor opens no missing database. When SQLite or cutover evidence exists, it
 validates the immutable manifest, exact application/schema identity, lineage,
@@ -170,7 +165,7 @@ resolve state through global `HIVE_HOME`, `XDG_STATE_HOME`, and `HOME`, with
 `HIVE_HOME` taking precedence. Injecting an environment does not isolate those
 host-driven checks.
 
-## Legacy rows and exit codes
+## Legacy checks
 
 Doctor retains these legacy rows: a `claude/auth` warning when the shell
 exports `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` (Hive unsets them before
@@ -202,45 +197,7 @@ MCP rows (`Hive::Mcp::DoctorCheck`, stage `mcp`; see [[modules/mcp]]):
 The last two compare personal configs through `Hive::Mcp::Discovery`, which runs
 `codex mcp list --json` and `opencode debug config`; in-process tests skip that
 comparison (`mcp_discover: nil`).
-These appear under `checks`, not
-`managed_skills`.
-
-| Code | Meaning |
-|---:|---|
-| 0 | Every available managed target is healthy; unavailable-only rows are non-blocking. |
-| 65 | An available target is missing, stale, incompatible, or conflicting, or a required legacy dependency failed. |
-| 78 | Effective config or manifest input is invalid. |
-
-## JSON envelope (`hive-doctor.v2`)
-
-```json
-{
-  "schema": "hive-doctor.v2",
-  "schema_version": 2,
-  "managed_skills": [
-    {
-      "kind": "managed_skill",
-      "agent": "claude",
-      "capability": "ce-brainstorm",
-      "health": "missing",
-      "expected": {"package": "compound-engineering@compound-engineering-plugin"},
-      "native": {"available": true, "package": null},
-      "resolution": {"path": null},
-      "remediation": "hive setup-agents --agent claude --skill ce-brainstorm"
-    }
-  ],
-  "checks": [],
-  "summary": {"managed": {"missing": 1}, "legacy_failures": 0, "warnings": 0}
-}
-```
-
-`schemas/hive-doctor.v1.json` remains packaged for pinned consumers, but the
-command emits v2. The v2 split prevents managed skill evidence from changing
-the meaning of old stage/reviewer check rows.
-
-Both the v2 success document and the compact configuration-error document call
-`JSON.generate` directly. A serialization failure is not converted into a
-text response or fallback JSON document; it propagates as a failed invocation.
+These appear under `checks`, not `managed_skills`.
 
 ## Init integration
 

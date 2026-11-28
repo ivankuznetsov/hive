@@ -6,6 +6,8 @@ updated: 2026-11-23
 tags: [command, sqlite, status, read-only, audit, bootstrap]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-runtime) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 `hive runtime status [--json]` validates the current SQLite database read-only.
 Healthy storage reports `active`; missing storage reports `absent`, exits 1 and
 points to `hive setup`. Unsupported or corrupt storage returns a typed error.

@@ -7,29 +7,9 @@ updated: 2026-11-11
 tags: [command, approval, json, dependencies, admission]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-approve) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive approve` moves a task folder and commits the transition. Forward moves revalidate dependency admission under the existing commit/task locks immediately before mutation. Backward recovery and same-stage no-ops remain available; `--force` cannot bypass admission.
-
-## Usage
-
-```
-hive approve <slug>                        # auto: current stage → next stage
-hive approve <slug> --to <stage>           # explicit destination (forward or backward)
-hive approve <slug> --from <stage>         # idempotency: assert current stage before advancing
-hive approve <slug> --project <name>       # disambiguate when slug exists in 2+ projects
-hive approve <slug> --force                # bypass terminal-marker check on forward move
-hive approve <task-folder> [...]           # take a folder path instead of a slug
-hive approve <slug> --json                 # machine-readable result (success AND error)
-```
-
-`<stage>` accepts either the full directory name (`3-plan`) or the short suffix (`plan`). Both `--to` and `--from` are validated against the closed enum at parse time (Thor `enum:` constraint).
-
-Remote approval requires `answer` authority and full stage/generation guards.
-When omitted by a token with `read`, the CLI resolves them and prints the exact
-`--from`, `--generation` and retry key to stderr before submission. Reuse those
-values for a lost-response retry after advancement. Retained remote verification
-composes with caller observation guards and always refuses force/destination
-overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
-[[remote-access]].
 
 ## Steps performed (`Commands::Approve#call`)
 
@@ -77,80 +57,7 @@ overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
     not moved or overwritten. A caller-supplied observation lets composed
     Decide transitions retain that same identity through the move and any
     later sibling-file rollback.
-13. Report human prose or one `hive-approve` JSON document.
-
-## JSON contract (`schema = "hive-approve"`, version 2)
-
-### Success
-
-```json
-{
-  "schema": "hive-approve",
-  "schema_version": 2,
-  "ok": true,
-  "noop": false,
-  "slug": "fix-bug-260424-aaaa",
-  "from_stage": "brainstorm",
-  "from_stage_index": 2,
-  "from_stage_dir": "2-brainstorm",
-  "to_stage": "plan",
-  "to_stage_index": 3,
-  "to_stage_dir": "3-plan",
-  "direction": "forward",
-  "forced": false,
-  "from_marker": "complete",
-  "from_folder": "/home/you/Dev/proj/.hive-state/stages/2-brainstorm/fix-bug-260424-aaaa",
-  "to_folder":   "/home/you/Dev/proj/.hive-state/stages/3-plan/fix-bug-260424-aaaa",
-  "commit_action": "approve 2-brainstorm -> 3-plan",
-  "next_action": {
-    "kind": "run",
-    "folder": "/home/you/Dev/proj/.hive-state/stages/3-plan/fix-bug-260424-aaaa",
-    "command": "hive run /home/you/Dev/proj/.hive-state/stages/3-plan/fix-bug-260424-aaaa"
-  }
-}
-```
-
-The split `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined) shape mirrors `hive-run`'s `stage` / `stage_index` so a consumer can compare across schemas without string parsing. `next_action.kind` is drawn from the closed `Hive::Schemas::NextActionKind` enum (`edit`, `mv`, `approve`, `run`, `recover_stale`, `no_op`). `hive run --json` now emits `kind=approve` for `:complete`, `:execute_complete`, and `:review_complete` (was `mv`); the `mv` value is retained in the enum for back-compat.
-
-### Error envelope (every failure path under `--json`)
-
-```json
-{
-  "schema": "hive-approve",
-  "schema_version": 2,
-  "ok": false,
-  "error_class": "AmbiguousSlug",
-  "error_kind": "ambiguous_slug",
-  "exit_code": 64,
-  "message": "slug 'X' is ambiguous (in projA, projB); pass --project <name>",
-  "candidates": [
-    { "project": "projA", "stage": "1-inbox", "folder": "..." },
-    { "project": "projB", "stage": "1-inbox", "folder": "..." }
-  ]
-}
-```
-
-Different errors carry different structured fields:
-- `AmbiguousSlug` → `candidates: [{project, stage, folder}, ...]`
-- `DestinationCollision` → `path: "<conflicting destination>"`
-- `FinalStageReached` → `stage: "9-done"`
-- `DependencyWaitError` → `error_kind: "dependency_wait"`, exit 75, plus `reason_code`, `offending_ref`, `safe_correction`
-- `DependencyAdmissionError` → `error_kind: "admission_error"`, exit 78, plus the same structured fields
-- `ConditionGateBlocked` → `error_kind: "wrong_stage"`, exit 4, plus the complete `condition_gate` and reason-specific `next_action`
-
-The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hive run --json`'s dual-signal pattern (JSON document + non-zero exit code).
-
-`Hive::Commands::Approve.error_kind_for` is the shared transition-error
-classifier. Workflow stage actions delegate to it because their outer envelope
-exposes the same closed error-kind enum while composing this command.
-
-Pre-dispatch usage failures, including missing or extra arguments rejected by
-Thor before command dispatch, use the same `hive-approve.v2` error contract
-with `error_kind: "invalid_task_path"`. For command-level error emission,
-`JSON::GeneratorError` is deliberately propagated rather than suppressed or
-replaced with a second document.
-
-Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schema suites. The current artifact is `schemas/hive-approve.v2.json`; v1 remains available for historical validation.
+13. Report human prose or one `hive-approve` JSON document via `Hive::Schemas::EnvelopeEmitter`; `Hive::Commands::Approve.error_kind_for` is the shared transition-error classifier reused by workflow stage actions so both surfaces classify transition exceptions identically.
 
 ## Slug resolution rules
 
@@ -193,22 +100,6 @@ that retry the same lifecycle visit therefore reuse one operation receipt,
 while a workflow rework that legitimately revisits the same stage-to-stage
 route receives a distinct receipt instead of conflicting with the completed
 receipt from the earlier visit.
-
-## Exit codes
-
-| Condition | Exit | Class |
-|-----------|------|-------|
-| Success | 0 | — |
-| Slug not found / unknown `--to` or `--from` stage / `--project` path mismatch | 64 (`USAGE`) | `Hive::InvalidTaskPath` |
-| Slug ambiguous (cross-project or multi-stage in one project) | 64 (`USAGE`) | `Hive::AmbiguousSlug` |
-| Forward move without terminal marker (no `--force`) | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
-| `--from` mismatch (task at different stage than asserted) | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
-| Advancing past `9-done` | 4 (`WRONG_STAGE`) | `Hive::FinalStageReached` |
-| Destination already exists | 1 (`GENERIC`) | `Hive::DestinationCollision` |
-| Commit failed; mv rolled back | 1 (`GENERIC`) | `Hive::Error` |
-| Lock contention (commit lock held >30s) | 75 (`TEMPFAIL`) | `Hive::ConcurrentRunError` |
-| Valid prerequisite below its gate | 75 (`TEMPFAIL`) | `Hive::DependencyWaitError` |
-| Invalid/indeterminate dependency admission | 78 (`CONFIG`) | `Hive::DependencyAdmissionError` |
 
 ## Why not just use `mv`?
 

@@ -7,15 +7,9 @@ updated: 2026-09-02
 tags: [command, registry, cleanup, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-forget) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive forget NAME [--if-exists] [--json]` removes the entry whose `name` matches NAME from the global registry (`~/.config/hive/config.yml` by default, or `HIVE_HOME/config.yml` when overridden). Inverse of `hive init`. The project's `.hive-state` directory on disk is **not** touched — registry and on-disk state are intentionally independent. Unknown name is a USAGE error (exit 64) unless `--if-exists` is passed; empty NAME positional is a distinct USAGE error with `error_kind: "missing_name"`. Bulk version: [[commands/prune]].
-
-## Usage
-
-```
-hive forget NAME             # remove one named entry; text output
-hive forget NAME --json      # same, machine-readable envelope
-hive forget NAME --if-exists # exit 0 if NAME is already absent
-```
 
 ## Why
 
@@ -31,60 +25,6 @@ For the bulk-of-stale-entries case, prefer `hive prune`. The TUI grid Shift+X ke
 4. nil without `--if-exists` → `error_kind: "unknown_project"` / exit 64 (mirrors `hive metrics --project NAME`).
 5. nil with `--if-exists` → success with `removed: false`; the registry is not rewritten.
 6. Otherwise: rewrite `config.yml` and emit success with `removed: true`.
-
-## JSON contract (`schema = "hive-forget"`, version 1)
-
-### Success: removed
-
-```json
-{
-  "schema": "hive-forget",
-  "schema_version": 1,
-  "ok": true,
-  "removed": true,
-  "name": "demo",
-  "path": "/home/me/Dev/demo",
-  "hive_state_path": "/home/me/Dev/demo/.hive-state"
-}
-```
-
-### Success: already absent with `--if-exists`
-
-```json
-{
-  "schema": "hive-forget",
-  "schema_version": 1,
-  "ok": true,
-  "removed": false,
-  "name": "ghost"
-}
-```
-
-### Error envelope
-
-```json
-{
-  "schema": "hive-forget",
-  "schema_version": 1,
-  "ok": false,
-  "error_class": "UsageError",
-  "error_kind": "unknown_project",
-  "exit_code": 64,
-  "message": "hive forget: no entry named \"ghost\" in /home/me/.config/hive/config.yml"
-}
-```
-
-`error_kind` enum (closed, mirrors `Hive::Schemas::ForgetErrorKind::ALL`):
-
-| `error_kind` | Exit | Cause |
-|---|---|---|
-| `usage` | 64 | malformed argv rejected before command dispatch |
-| `missing_name` | 64 | NAME positional was empty/whitespace |
-| `unknown_project` | 64 | NAME does not match any registry entry and `--if-exists` was not passed |
-| `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |
-| `internal` | 70 | uncategorised crash |
-
-External consumers validate against `schemas/hive-forget.v1.json`; resolve via `Hive::Schemas.schema_path("hive-forget")`. Pre-dispatch argv failures use the same envelope with `error_kind: "usage"`. If command-level error-envelope encoding raises `JSON::GeneratorError`, forget warns on stderr, emits no substitute document, and re-raises the original typed failure.
 
 ## Idempotency
 

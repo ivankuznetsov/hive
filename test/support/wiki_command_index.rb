@@ -7,6 +7,7 @@ module WikiCommandIndex
   OWNER_TARGET = /\A(?:commands|modules)\/[a-z0-9][a-z0-9_-]*\z/.freeze
   ANY_COMMAND = /\bhive[ \t]+(?:[a-z0-9_][a-z0-9_-]*|--?[a-z0-9][a-z0-9_-]*)/.freeze
   WRAPPER_ALIASES = { "-v" => "version" }.freeze
+  HISTORICAL_COMMAND_PAGES = %w[commands/migrate].freeze
   COMMAND_OWNERS = {
     "archive" => "commands/stage_action",
     "artifacts" => "commands/stage_action",
@@ -32,9 +33,7 @@ module WikiCommandIndex
   end
 
   Row = Struct.new(:command, :owner, :line, keyword_init: true)
-  Section = Struct.new(:heading, :body, keyword_init: true)
   MarkdownLine = Struct.new(:number, :text, :fenced, keyword_init: true)
-  ContractContext = Struct.new(:command, :pattern, :texts, keyword_init: true)
   Result = Struct.new(
     :help_commands,
     :index_commands,
@@ -51,28 +50,14 @@ module WikiCommandIndex
   Metadata = Struct.new(:visible, :hidden, :aliases, :diagnostics, keyword_init: true)
 
   class Guard
-    # Owner pages predate this guard and use domain-specific H2 names. These
-    # patterns enumerate that existing heading vocabulary; the requirement
-    # checks below still require explicit, command-scoped content rather than
-    # treating a heading match alone as a contract.
-    CONTRACT_HEADINGS = {
-      syntax: /\A(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands)\b/i,
-      options: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands|Options?)\b/i,
-      behavior: /\A(?:Behavior|Steps performed|Lifecycle|Flow|Pipeline|Effects?|Contract|Commands|Actions?|Mutations?|Guards?|Inspection|Diagnosis|Status|States|Modes|Meaning|Boundaries|Cleanup|Inputs|Outcomes?|Backend|Read-only|Dispatch|Recovery|Preconditions|Events|Channels?|Installers?|Bundle|Surfaces?|Layout|Data source|Class shape|Connect Behavior|Disconnect Behavior|What the daemon dispatches|Runtime control-plane diagnosis|Discovery lifecycle|Applicability and boundary|Consent and lifecycle)\b/i,
-      examples: /\b(?:Usage|Synopsis|CLI|Invocation|Surface|Subcommands|Mode contract|Inspection|Commands|Examples?)\b/i,
-      schema: /\b(?:JSON|Schema|Output|Contract|Inventory|Outcomes?|Structured log|Inspection|Serialization|CLI|Machine-readable|Status|Task metadata|Data source|Surfaces?|Validation|Usage|Synopsis|Errors?|Exit codes?|Meaning|Events)\b/i,
-      output_exceptions: /\b(?:Errors?|Failures?|Refusals?|Output exceptions?|Exit codes?|Outcomes?|Termination|Serialization|Contract|Machine-readable)\b/i,
-      serialization_fallback: /\b(?:Serialization|JSON|Output|Errors?|Termination|Exit codes?)\b/i,
-      exit_codes: /\b(?:Exit codes?|Errors?|Failures?|Refusals?|Outcomes?|Termination|Serialization|Contract|Machine-readable)\b/i
-    }.freeze
-
-    def initialize(wiki_root: nil, owner_reader: nil, expected_owners: COMMAND_OWNERS)
+    def initialize(wiki_root: nil, docs_cli_path: nil, owner_reader: nil, expected_owners: COMMAND_OWNERS)
       @wiki_root = wiki_root
+      @docs_cli_path = docs_cli_path || (wiki_root ? File.expand_path("../docs/cli.md", wiki_root) : nil)
       @owner_reader = owner_reader || method(:read_owner)
       @expected_owners = expected_owners
     end
 
-    def evaluate(help_text:, index_text:, validate_contracts: true)
+    def evaluate(help_text:, index_text:, validate_authority_links: true)
       help_commands, help_diagnostics = parse_help(help_text)
       rows, index_diagnostics = parse_index(index_text)
       diagnostics = help_diagnostics + index_diagnostics
@@ -80,19 +65,19 @@ module WikiCommandIndex
 
       diagnostics.concat(duplicate_diagnostics(help_commands, :duplicate_help_command))
       diagnostics.concat(duplicate_diagnostics(rows.map(&:command).compact, :duplicate_index_command))
-      help_set = help_commands.uniq
       index_set = rows.map(&:command).compact.uniq
       diagnostics.concat(missing_pinned_owner_diagnostics(index_set))
-      (help_set - index_set).each do |command|
-        diagnostics << diagnostic(:missing_index_command, command)
-      end
-      (index_set - help_set).each do |command|
-        diagnostics << diagnostic(:stale_index_command, command)
-      end
 
       owners, owner_documents, owner_diagnostics = resolve_owners(rows)
       diagnostics.concat(owner_diagnostics)
-      diagnostics.concat(validate_owner_contracts(owners, owner_documents)) if validate_contracts
+      if validate_authority_links
+        diagnostics.concat(authority_link_diagnostics("cli", index_text))
+        owner_documents.each do |target, document|
+          next if HISTORICAL_COMMAND_PAGES.include?(target)
+
+          diagnostics.concat(authority_link_diagnostics(target, document))
+        end
+      end
 
       Result.new(
         help_commands: help_commands.freeze,
@@ -101,6 +86,10 @@ module WikiCommandIndex
         owner_documents: owner_documents.freeze,
         diagnostics: diagnostics.sort_by(&:sort_key).freeze
       ).freeze
+    end
+
+    def parse_rendered_help(help_text)
+      parse_help(help_text)
     end
 
     def metadata(all_commands:, command_map:)
@@ -171,9 +160,6 @@ module WikiCommandIndex
         break if commands.any? && line.match?(/\A\S.*:\s*\z/)
         next if line.strip.empty?
 
-        # Thor renders command banners with exactly two leading spaces. Matching
-        # that boundary avoids treating wrapped descriptions as commands when
-        # the terminal is narrow.
         match = line.match(/\A\s{2}\S+\s+(#{INDEX_COMMAND_NAME})(?=\s|\z)/)
         commands << match[1] if match
       end
@@ -192,16 +178,15 @@ module WikiCommandIndex
         line.fenced || !line.text.start_with?("## ")
       end
       table_lines = section.filter_map do |line|
-        [ line.text, line.number ] if !line.fenced && line.text.lstrip.start_with?("|")
+        [ line.text, line.number ] if !line.fenced && line.text.match?(/\A {0,3}\|/)
       end
       diagnostics = []
-      if table_lines.size < 2
-        return [ [], [ diagnostic(:missing_index_table) ] ]
-      end
+      return [ [], [ diagnostic(:missing_index_table) ] ] if table_lines.size < 2
 
       header = cells(table_lines[0][0])
       separator = cells(table_lines[1][0])
-      unless header == [ "Command", "Owner" ] && separator&.size == 2 &&
+      unless [ [ "Command", "Owner" ], [ "Command", "Architecture" ] ].include?(header) &&
+          separator&.size == 2 &&
           separator.all? { |cell| cell.match?(/\A:?-{3,}:?\z/) }
         diagnostics << diagnostic(:malformed_index_header, table_lines[0][1])
       end
@@ -332,239 +317,74 @@ module WikiCommandIndex
       [ owners, documents, diagnostics ]
     end
 
-    def validate_owner_contracts(owners, documents)
-      owners.group_by { |_command, target| target }.flat_map do |target, command_owners|
-        document = documents.fetch(target)
-        sections = contract_sections(document)
-        shared = command_owners.size > 1
-        units = sections.to_h { |section| [ section, contract_units(section) ] }
-        command_owners.flat_map do |command, _|
-          pattern = command_pattern(command)
-          reference = command_reference_pattern(command)
-          texts = units.transform_values do |section_units|
-            if shared
-              section_units.select { |text| text.match?(pattern) }
-            else
-              eligible = section_units.reject { |text| text.match?(ANY_COMMAND) && !text.match?(reference) }
-              eligible.empty? ? [] : [ eligible.join("\n") ]
-            end
-          end
-          context = ContractContext.new(command: command, pattern: pattern, texts: texts).freeze
-          CONTRACT_HEADINGS.keys.filter_map do |requirement|
-            next if contract_requirement?(requirement, document, sections, context)
+    def authority_link_diagnostics(target, document)
+      visible = markdown_lines(document).reject(&:fenced).map(&:text).join
+      links = visible.scan(/\[[^\]]+\]\(([^)]*docs\/cli\.md(?:#[^)]+)?)\)/).flatten.uniq
+      if links.empty?
+        return [ diagnostic(:missing_authority_link, target, "must link to docs/cli.md") ]
+      end
 
-            diagnostic(:incomplete_owner_contract, command, "#{target}:#{requirement}")
-          end
+      return [] unless @wiki_root && @docs_cli_path && File.file?(@docs_cli_path)
+
+      page_path = File.join(@wiki_root, "#{target}.md")
+      anchors = docs_cli_anchors
+      links.filter_map do |link|
+        rel_path, anchor = link.split("#", 2)
+        resolved = File.expand_path(rel_path, File.dirname(page_path))
+        if resolved != File.expand_path(@docs_cli_path)
+          diagnostic(:broken_authority_link, target, "#{link} -> #{resolved}")
+        elsif anchor && !anchors.include?(anchor)
+          diagnostic(:broken_authority_anchor, target, "#{link}")
         end
       end
     end
 
-    def contract_sections(document)
-      sections = []
-      heading = nil
-      body = +""
-
-      markdown_lines(document).each do |line|
-        if !line.fenced && (match = line.text.match(/^## (.+)$/))
-          sections << Section.new(heading: heading, body: body.freeze).freeze if heading
-          heading = match[1].strip
-          body = +""
-          next
-        end
-        body << line.text if heading
-      end
-      sections << Section.new(heading: heading, body: body.freeze).freeze if heading
-      sections
-    end
-
-    def contract_requirement?(requirement, document, sections, context)
-      return false unless sections.any? do |section|
-        section.heading.match?(context.pattern) || section.body.match?(context.pattern)
-      end
-
-      case requirement
-      when :syntax
-        sections.any? do |section|
-          section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax)) &&
-            section.body.match?(context.pattern)
-        end
-      when :options
-        options_contract?(sections, context)
-      when :behavior
-        contract_text?(
-          sections, :behavior, context, /\S/,
-          meaningful: true
-        )
-      when :examples
-        sections.any? { |section|
-          section.heading.match?(/\bExamples?\b/i) && section.body.match?(context.pattern)
-        } || sections.sum { |section|
-          section.heading.match?(CONTRACT_HEADINGS.fetch(:syntax)) ? section.body.scan(context.pattern).size : 0
-        } >= 2
-      when :schema
-        contract_text?(
-          sections, :schema, context,
-          /hive-[a-z0-9-]+(?:\.v|`?\s+v)\d+|schema\s+`hive-[a-z0-9-]+`|schema(?:_version| version|\s*=).*?\d|schema-less|text-only|human-readable|plain text|no (?:success )?(?:structured|JSON)|no [^.\n]*schema|unversioned/i,
-          meaningful: true
-        )
-      when :output_exceptions
-        contract_text?(sections, :output_exceptions, context, /error|fail|refus|warn|exception|invalid|unknown/i) ||
-          contract_text?(sections, :output_exceptions, context, /not applicable|none/i, heading_pattern: /\bOutput exceptions?\b/i)
-      when :serialization_fallback
-        contract_text?(sections, :serialization_fallback, context, /serializ|JSON\.generate|GeneratorError|fallback|propagat|suppress|no JSON/i) ||
-          contract_text?(sections, :serialization_fallback, context, /not applicable/i, heading_pattern: /\bSerialization\b/i)
-      when :exit_codes
-        contract_text?(sections, :exit_codes, context, /\bexit(?:[_ ]code)?s?\b[\s\S]*?(?:`?\d+`?)/i) ||
-          contract_text?(sections, :exit_codes, context, /not applicable/i, heading_pattern: /\bExit codes?\b/i)
+    def docs_cli_anchors
+      @docs_cli_anchors ||= File.read(@docs_cli_path).scan(/^#+ (.+)$/).flatten.map do |heading|
+        heading.downcase.gsub(/[`.,()]/, "").gsub(/[^a-z0-9 _-]/, "").strip.gsub(/\s+/, "-")
       end
     end
 
-    def contract_text?(sections, requirement, context, content_pattern,
-      heading_pattern: CONTRACT_HEADINGS.fetch(requirement), meaningful: false)
-      sections.any? do |section|
-        next false unless section.heading.match?(heading_pattern)
-
-        texts = contract_texts(section, requirement, context)
-        texts.any? do |text|
-          text.match?(content_pattern) && (!meaningful || meaningful_contract_text?(text))
-        end
-      end
-    end
-
-    def contract_texts(section, requirement, context)
-      texts = context.texts.fetch(section)
-      header = section.body.lines.filter_map { |line| cells(line) }.first
-      return texts unless header&.first == "Command"
-
-      column = header.index { |name| name.downcase == requirement.to_s.tr("_", " ") }
-
-      texts.flat_map do |text|
-        rows = text.lines.filter_map { |line| cells(line) }
-        if rows.empty?
-          [ text ]
-        else
-          rows.filter_map do |row|
-            (column ? row[column].to_s : "") if row.first.match?(context.pattern)
-          end
-        end
-      end
-    end
-
-    def options_contract?(sections, context)
-      sections.any? do |section|
-        next false unless section.heading.match?(CONTRACT_HEADINGS.fetch(:options))
-
-        texts = contract_texts(section, :options, context)
-        texts.any? do |text|
-          explicit_none = text.match?(/options?\s*(?::|are)\s*(?:not applicable|none)|no (?:command-specific )?options?/i)
-          flags = text.match?(/--[a-z]/)
-          explicit_heading = section.heading.match?(/\bOptions?\b/i)
-          explicit_none || (flags && (explicit_heading || prose_contract_text?(text)))
-        end
-      end
-    end
-
-    def contract_units(section)
-      units = []
-      paragraph = []
-      subheading = nil
-      was_fenced = false
-
-      flush = lambda do
-        if paragraph.any?
-          units << [ section.heading, subheading, paragraph.join ].compact.join("\n")
-          paragraph.clear
-        end
-      end
-
-      markdown_lines(section.body).each do |line|
-        if line.fenced
-          flush.call unless was_fenced
-          paragraph << line.text
-          was_fenced = true
-          next
-        elsif was_fenced
-          flush.call
-          was_fenced = false
-        end
-
-        if (match = line.text.match(/^### (.+)$/))
-          flush.call
-          subheading = match[1].strip
-        elsif line.text.lstrip.start_with?("|")
-          flush.call
-          units << [ section.heading, subheading, line.text ].compact.join("\n")
-        elsif line.text.strip.empty?
-          flush.call
-        else
-          paragraph << line.text
-        end
-      end
-      flush.call
-      units
-    end
-
-    def command_pattern(command)
-      /\bhive[ \t]+#{Regexp.escape(command)}(?=\s|`|[.,;:\/\[\]()|]|\z)/
-    end
-
-    def command_reference_pattern(command)
-      escaped = Regexp.escape(command)
-      /(?:\bhive-#{escaped}(?=[.\-])|(?<![a-z0-9_-])#{escaped}(?![a-z0-9_-]))/i
-    end
-
-    def markdown_lines(document)
+    def markdown_lines(text)
       fence = nil
       comment = false
-      document.each_line.with_index(1).map do |text, number|
+      result = []
+      text.each_line.with_index(1) do |raw, number|
         if fence
-          marker = text.match(/^ {0,3}(`{3,}|~{3,})/)&.[](1)
+          marker = raw.match(/\A {0,3}(`{3,}|~{3,})/)&.[](1)
           fence = nil if marker&.start_with?(fence[0]) && marker.length >= fence.length
-          MarkdownLine.new(number: number, text: text, fenced: true).freeze
-        elsif !comment && text.match?(/\A(?: {4}|\t)/)
-          MarkdownLine.new(number: number, text: text, fenced: true).freeze
+          result << MarkdownLine.new(number: number, text: raw, fenced: true).freeze
         else
-          text, comment = visible_comment_text(text, comment)
-          marker = text.match(/^ {0,3}(`{3,}|~{3,})/)&.[](1)
+          visible, comment = strip_html_comments(raw, comment)
+          marker = visible.match(/\A {0,3}(`{3,}|~{3,})/)&.[](1)
           fence = marker if marker
-          MarkdownLine.new(number: number, text: text, fenced: !marker.nil?).freeze
+          result << MarkdownLine.new(number: number, text: visible, fenced: !marker.nil?).freeze
         end
       end
+      result
     end
 
-    def visible_comment_text(text, comment)
+    def strip_html_comments(text, in_comment)
       visible = +""
-      remaining = text
+      rest = text
       loop do
-        if comment
-          closing = remaining.index("-->")
-          return [ visible, true ] unless closing
+        if in_comment
+          idx = rest.index("-->")
+          return [ visible, true ] unless idx
 
-          remaining = remaining[(closing + 3)..]
-          comment = false
+          rest = rest[(idx + 3)..]
+          in_comment = false
         else
-          opening = remaining.index("<!--")
-          unless opening
-            visible << remaining
+          idx = rest.index("<!--")
+          unless idx
+            visible << rest
             return [ visible, false ]
           end
-
-          visible << remaining[...opening]
-          remaining = remaining[(opening + 4)..]
-          comment = true
+          visible << rest[...idx]
+          rest = rest[(idx + 4)..]
+          in_comment = true
         end
       end
-    end
-
-    def meaningful_contract_text?(text)
-      !text.match?(/\b(?:TODO|TBD|FIXME)\b/i) &&
-        (text.match?(/schema-less|text-only|human-readable|plain text|no (?:success )?(?:structured|JSON)|no [^.\n]*schema|unversioned/i) ||
-          text.match?(/\bschema\b/i) || prose_contract_text?(text))
-    end
-
-    def prose_contract_text?(text)
-      prose = text.gsub(/```.*?```|~~~.*?~~~/m, "").gsub(/`[^`]*`/, "")
-      prose.match?(/[A-Za-z]{4,}.*[A-Za-z]{4,}/m) && !prose.match?(/\b(?:TODO|TBD|FIXME)\b/i)
     end
 
     def read_owner(target)

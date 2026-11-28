@@ -9,7 +9,7 @@
 - **Executable and alias:** `bin/hive` (also invoked as `hv` when linked) runs context preflight, help rewriting, and boolean JSON normalization before invoking Thor (`Hive::CLI.start`).
 - **Context preflight (`--context NAME`):** `--context NAME` (or `--context=NAME`) overrides the saved client context for one invocation before local runtime activation or project discovery. `context_management` commands (`context`, `help`, `tree`, `version`) always run client-side. `supported_remote` commands (`status`, `task`, `new`, `act`, `answer`, `approve`, `operation`) call HTTPS when a remote context is active. All other visible commands are `local_only` and fail closed under a remote context with `<command> requires a local context; specify --context local` and exit `64`.
 - **Boolean `--json` grammar:** `--json` is inherited by every command. Wrapper and remote preflight accept `--json`, `--no-json`, `--skip-json`, and explicit boolean assignments (`--json=true|false|TRUE|FALSE|t|f|T|F`), rejecting non-boolean `--json=VALUE` assignments before dispatch with exit `64`. Each leaf below states whether `--json` produces a single JSON document, JSON Lines, a success-only JSON document, is rejected (exit `64`), or is ignored (text-only).
-- **Help and version rewriting:** `hive COMMAND --help` (or `-h`, `-?`, `-D`) is rewritten to `hive help COMMAND` before dispatch without running `COMMAND`, except past `--` or inside `hive new PROJECT TEXT` task prose. `hive --version` and `hive -v` route to `hive version`. `hive pr` aliases `hive open-pr`. `hive --tree` and `hive -t` route to `hive tree`.
+- **Help and version rewriting:** `hive COMMAND --help` or `hive COMMAND -h` is rewritten to `hive help COMMAND` before dispatch without running `COMMAND`, except past `--` or inside `hive new PROJECT TEXT` task prose. Top-level help aliases are `--help`, `-h`, `-?`, and `-D`. `hive --version` and `hive -v` route to `hive version`. `hive pr` aliases `hive open-pr`. `hive --tree` and `hive -t` route to `hive tree`.
 - **Option lifting on `hive new`:** Wrapper normalization lifts known `new` flags (`--base`, `--depends-on`, `--workflow`, `--idempotency-key`, `--json`, `--context`) placed between `PROJECT` and `TEXT` while leaving everything after `--` or inside task prose literal.
 - **Literal `--` boundary:** Arguments after `--` are passed literally without flag interpretation.
 - **Mutation context banner:** When a local mutating invocation runs, preflight prints `hive: context=local installation=local authority=unrestricted-local-operator target=<target>` to stderr (never stdout).
@@ -31,7 +31,7 @@ Use `hive findings TARGET` to list GFM checkbox findings from the latest review 
 
 ## Patrol
 
-Use `hive patrol PROJECT` for ordinary defect patrol (`hive-patrol.v3`, with `--list` emitting `hive-patrol-findings.v1` and `--once` emitting `hive-one-shot.v1`) and `hive refactor-patrol PROJECT` for language-neutral architecture patrol (`hive-refactor-patrol.v4`, with `--list` / `--show` emitting `hive-refactor-patrol-jobs.v2` using 100-record default pages and an immutable intake-sequence high-water cursor, and `--once` emitting `hive-one-shot.v1`).
+Use `hive patrol PROJECT` for discovery-only defect patrol (`hive-patrol.v3`, with `--list` emitting `hive-patrol-findings.v1` and `--once` emitting `hive-one-shot.v1`) and `hive refactor-patrol PROJECT` for discovery-only language-neutral architecture patrol (`hive-refactor-patrol.v4`, with `--list` / `--show` emitting `hive-refactor-patrol-jobs.v2` using 100-record default pages and an immutable intake-sequence high-water cursor, and `--once` emitting `hive-one-shot.v1`). Both publish accepted findings to the shared Patrol Fix admission store without editing code or opening PRs.
 
 ## Daemon
 
@@ -51,7 +51,7 @@ Every visible command inherits `--json`, but actual framing depends on the leaf:
 
 - **Single-document JSON (typed envelope on success and error):** Most commands emit one JSON object to stdout conforming to their versioned schema under [schemas/](../schemas/) and document their `JSON::GeneratorError` serialization policy (`:suppress`, `:raise`, or `:warn`).
 - **JSON Lines (`--json-lines` or streaming `--json`):** `hive watch` rejects `--json` (exit `64`) and streams `hive-watch-event.v1` JSON Lines via `--json-lines`. `hive connect screenote --json` streams an `authorize` JSON line followed by the final outcome line.
-- **Success-only JSON:** Local `hive task --json`, `hive bench submit --json`, `hive publication-reconcile --json`, and `hive evidence recover|rework|terminal|server --json` emit JSON on success and report errors on stderr without a JSON error envelope.
+- **Success-only JSON:** Local `hive task --json`, `hive bench submit --json`, `hive publication-reconcile --json`, `hive web capture --json`, and `hive evidence recover|rework|terminal|server --json` emit JSON on success and report errors on stderr without a JSON error envelope.
 - **Explicitly rejected `--json` (exit `64`):** `hive watch`, `hive tui`, `hive web` (bare, `start`, `stop`), `hive daemon clear-hold`, `hive mcp login`, and `hive workflow commit`.
 - **Ignored `--json` (text-only):** `hive help`, `hive tree`, `hive generate-name`, `hive plan-review-run`, `hive update`, `hive uninstall`, `hive wiki compile-log`, `hive daemon start|tail` (warns on stderr), `hive bot start|tail`, `hive babysit` named subcommands, and `hive evidence browser`.
 
@@ -134,7 +134,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--binding`, `--idempotency-key`, `--json`, `--context`
 - **Output:** Text inventory/acknowledgement, or single-document JSON: locally `hive-answer.v1` ([schemas/hive-answer.v1.json](../schemas/hive-answer.v1.json)) on success and error; remotely `hive-remote.v1` ([schemas/hive-remote.v1.json](../schemas/hive-remote.v1.json)).
 - **Context behavior:** Local reads or writes brainstorm questions directly in task state. Remote GETs `/questions` in `inventory` mode and POSTs `/answers` with stdin text and `--idempotency-key` in `write` mode.
-- **Exits and retry:** `0` inventory read or answer recorded, `20`/`21`/`22` receipt conflict/in-progress/unresolved, `64` invalid target, stale binding token, or empty/oversized stdin, `69`/`75` transient transport or lock contention (safe to replay with the same `--idempotency-key`), `70` internal error.
+- **Exits and retry:** `0` inventory read or syntactically valid write receipt (`ok: true` with closed `outcome`: `written`, `idempotent`, `stale`, `ambiguous`, `conflict`, or `lock_busy` — refresh inventory and retry on `stale`/`lock_busy`), `4` task not in coding `2-brainstorm`, `20`/`21`/`22` receipt conflict/in-progress/unresolved, `64` invalid target, malformed binding token, or empty/oversized stdin, `69`/`75` transient remote transport failure or lock-free inventory identity change during observation (safe to replay writes with the same `--idempotency-key`), `70` internal error, `78` config error.
 - **Effects and approvals:** `inventory` is read-only. `write` appends the answer and updates question markers under task locking; binding token prevents stale-question overwrite.
 - **Example:** `printf 'Option B\n' | hive answer demo:my-task --binding tok_123 --idempotency-key ans-1 --json`
 
@@ -150,8 +150,8 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--dry-run`, `--date`, `--json`, `--context`
 - **Output:** Text summary, or single-document JSON (`hive-answer-digest.v1`, [schemas/hive-answer-digest.v1.json](../schemas/hive-answer-digest.v1.json)) on success and error.
 - **Context behavior:** Local only; remote context exits `64` with `answer-digest requires a local context; specify --context local`.
-- **Exits and retry:** `0` digest sent or dry-run computed (idempotent per date once delivered), `64` invalid `--date` or usage, `70` delivery/internal error, `78` malformed Telegram/global config.
-- **Effects and approvals:** Without `--dry-run`, sends a Telegram digest of tasks waiting on human input and records delivery state; `--dry-run` performs no send or state write.
+- **Exits and retry:** `0` digest sent, empty waiting set, or dry-run computed (`--date YYYY-MM-DD` labels output only and does not filter or deduplicate sends; once-per-local-day deduplication belongs to the daemon), `64` invalid `--date` or usage, `70` delivery/internal error, `78` malformed Telegram/global config.
+- **Effects and approvals:** Without `--dry-run`, sends a Telegram digest of tasks currently waiting on human input; `--dry-run` renders without loading `.env`, resolving Telegram credentials, or sending a message.
 - **Example:** `hive answer-digest --dry-run --json`
 
 ### `hive approve`
@@ -497,7 +497,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--base-url`, `--json`, `--context`
 - **Output:** Interactive text flow, or schema-less JSON Lines (`--json` streams an `authorize` JSON line carrying `authorize_url`, followed by a final success line with `issuer`, `client_id`, `project_id`, `base_url`, and `credential_path`, or an error line such as `needs_project_selection`).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` credential stored, `1` OAuth timeout (300s loopback window), `needs_project_selection` in non-interactive `--json`, or network/OS error, `64` unsupported service or bad URL.
+- **Exits and retry:** `0` credential stored, `1` unsupported service name, OAuth timeout (300s loopback window), `needs_project_selection` in non-interactive `--json`, or network/OS error, `64` missing `SERVICE` or malformed CLI usage (under `--json`, pre-dispatch usage contract emits schema-less `{ "ok": false, "service": "screenote", "error_kind": "usage" }`).
 - **Effects and approvals:** Opens browser OAuth 2.1 + PKCE loopback redirect, queries Screenote MCP projects, prompts interactively if multiple projects exist, and writes `~/.config/hive/screenote.json` (`0600`).
 - **Example:** `hive connect screenote --json`
 
@@ -956,7 +956,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--json`, `--context`
 - **Output:** Text confirmation, or single-document schema-less JSON (`{ "ok": true, "service": "screenote", "disconnected": ..., "revoked": ..., "reason": ... }`, plus structured error JSON on failure).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` disconnected or already absent (idempotent; revoke failures warn on stderr but still clear local credential), `1` OS/clear failure, `64` unsupported service.
+- **Exits and retry:** `0` disconnected or already absent (idempotent; revoke failures warn on stderr but still clear local credential), `1` unsupported service name or OS/clear failure, `64` missing `SERVICE` or malformed CLI usage (under `--json`, pre-dispatch usage contract emits schema-less `{ "ok": false, "service": "screenote", "error_kind": "usage" }`).
 - **Effects and approvals:** Attempts RFC 7009 token revocation against Screenote when a readable token exists and removes `~/.config/hive/screenote.json`.
 - **Example:** `hive disconnect screenote --json`
 
@@ -970,9 +970,9 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive doctor`
 - **Options:** `--json`, `--context`
-- **Output:** Human-readable diagnostic report, or single-document JSON (`hive-doctor.v2`, [schemas/hive-doctor.v2.json](../schemas/hive-doctor.v2.json)) reporting managed skill health precedence (`conflicting`, `incompatible`, `unavailable`, `stale`, `missing`, `healthy`) and required dependencies.
+- **Output:** Human-readable diagnostic report, or single-document JSON (`hive-doctor.v2`, [schemas/hive-doctor.v2.json](../schemas/hive-doctor.v2.json)) reporting managed skill health precedence (`conflicting`, `incompatible`, `unavailable`, `stale`, `missing`, `healthy`) and required dependencies. Both the v2 success document and compact config-error document call `JSON.generate` directly; serialization failure propagates with no text or fallback JSON document.
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` all available managed skills and required dependencies are healthy, `65` at least one available managed skill or required dependency is actionable, `70` internal error, `78` malformed manifest or global config.
+- **Exits and retry:** `0` all available managed skills and required dependencies are healthy (unavailable agent binaries are non-blocking), `65` at least one available managed skill is missing/stale/incompatible/conflicting or a required legacy dependency failed, `70` internal error, `78` malformed manifest or global/project config.
 - **Effects and approvals:** Strictly read-only inspection; never mutates agent config or installs skills.
 - **Example:** `hive doctor --json`
 
@@ -988,7 +988,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--from`, `--project`, `--json`, `--context`
 - **Output:** Text deletion report, or single-document JSON (`hive-drop.v2`, [schemas/hive-drop.v2.json](../schemas/hive-drop.v2.json)) on success and error (`:warn` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` task dropped cleanly, `4` `--from` stage mismatch, `64` unknown/ambiguous `TARGET`, `70` git/worktree/PR cleanup error, `75` lock contention.
+- **Exits and retry:** `0` task dropped cleanly, `4` `--from` stage mismatch on bare slug (`wrong_stage`; numeric-id/path `--from` filter misses return `64`), `64` unknown/ambiguous `TARGET` or task already in `9-done` (`already_archived`), `70` git/worktree/PR cleanup error, `75` lock contention or `kill_failed` (aborts before deleting any resources; retry after remediation), `78` malformed config.
 - **Effects and approvals:** Destructively stops any live task agent, removes task folders, worktree, and local branch, and closes an associated draft PR.
 - **Example:** `hive drop stale-task --project demo --json`
 
@@ -1183,7 +1183,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--force`, `--workflow`, `--new-workflow`, `--minimal`, `--preview`, `--refactor-patrol`, `--json`, `--context`
 - **Output:** Text summary, or single-document JSON: `standard` mode emits `hive-init.v3` ([schemas/hive-init.v3.json](../schemas/hive-init.v3.json)); `minimal_preview` mode emits `hive-init-preview.v1` ([schemas/hive-init-preview.v1.json](../schemas/hive-init-preview.v1.json)). Serialization failure policy is `:raise` (no fallback JSON).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` initialized or previewed, `2` project already initialized without `--force`, `64` invalid flag combination (e.g., `--preview` without `--minimal` or `--refactor-patrol` on an already-initialized project), `70` git/storage error, `78` config error.
+- **Exits and retry:** `0` initialized or previewed, `1` precondition failure (not a git repo, inside a linked worktree, or dirty working tree without `--force`), `2` project already initialized without `--force` and no workflow rebind, `64` user aborted TTY confirmation prompt or invalid flag combination (e.g., `--preview` without `--minimal` or `--refactor-patrol` on an already-initialized project), `70` git/storage error, `78` config error.
 - **Effects and approvals:** `minimal_preview` is read-only. `standard` creates the orphan `hive/state` branch, `.hive-state` worktree, LLM wiki scaffolding, and global registration (prompting on TTY for daemon enrollment and MCP import when applicable).
 - **Example:** `hive init --new-workflow custom --minimal --preview --json`
 
@@ -1471,7 +1471,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--base`, `--depends-on`, `--workflow`, `--idempotency-key`, `--json`, `--context`
 - **Output:** Text task summary, or single-document JSON: locally emits `hive-new.v1` ([schemas/hive-new.v1.json](../schemas/hive-new.v1.json)) on success and error (`:raise` serialization policy); remotely emits `hive-remote.v1` ([schemas/hive-remote.v1.json](../schemas/hive-remote.v1.json)).
 - **Context behavior:** Local creates the task directly in `PROJECT`'s entry stage (lifting known flags placed between `PROJECT` and `TEXT` while preserving prose after `--`). Remote validates `PROJECT`, non-blank `TEXT`, `--base`, repeatable `--depends-on`, `--workflow`, and `--idempotency-key`, then POSTs `/projects/<project>/tasks`.
-- **Exits and retry:** `0` created or replayed by `--idempotency-key`, `20`/`21`/`22` durable receipt conflict/in-progress/unresolved, `64` unknown project, blank text, invalid workflow/dependency, `69`/`75` transient remote or lock failure (replay lost remote response with the reported `idempotency_key` and `target`), `70` storage error, `78` config error.
+- **Exits and retry:** `0` created or replayed by `--idempotency-key`, `1` unknown/uninitialized project or empty task text (emits `hive-new.v1` error document when `--json` is passed), `20`/`21`/`22` durable receipt conflict/in-progress/unresolved, `64` missing `PROJECT`, invalid workflow/dependency, or malformed options, `69`/`75` transient remote or lock failure (replay lost remote response with the reported `idempotency_key` and `target`), `70` storage error, `78` config error (including strict root-key failures).
 - **Effects and approvals:** Creates a durable task folder in the workflow's entry stage and commits state; supplying `--idempotency-key` makes retries return the existing task.
 - **Example:** `hive new demo --workflow editorial --idempotency-key creator:42 --json "draft a launch post"`
 
@@ -1572,7 +1572,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Output:** Text summary, or single-document JSON per mode: `cycle` emits `hive-patrol.v3` ([schemas/hive-patrol.v3.json](../schemas/hive-patrol.v3.json)), `list` emits `hive-patrol-findings.v1` ([schemas/hive-patrol-findings.v1.json](../schemas/hive-patrol-findings.v1.json)), and `once` always emits `hive-one-shot.v1` ([schemas/hive-one-shot.v1.json](../schemas/hive-one-shot.v1.json)).
 - **Context behavior:** Local only; remote context exits `64`.
 - **Exits and retry:** `0` cycle/list/one-shot completed, `64` unknown project or incompatible flags, `70` review/fix/git failure, `75` live owner or lock contention (retryable), `78` malformed patrol config.
-- **Effects and approvals:** `list` and `--dry-run` are read-only; live `cycle` and `once` update `.hive-state/patrol/` state, run regression-verified fixes for qualifying findings, open PRs, and optionally hand off to `6-review`.
+- **Effects and approvals:** Discovery-only (`list` and `--dry-run` are read-only); live `cycle` and `once` update `.hive-state/patrol/` state and reserve accepted findings in the shared Patrol Fix admission store without editing code, creating worktrees, pushing branches, opening PRs, or creating review tasks.
 - **Example:** `hive patrol my-project --dry-run --json`
 
 ### `hive plan`
@@ -1603,7 +1603,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--answer`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` answer recorded, `4` stale/conflicting freshness identity (re-read `hive plan-review TARGET show --json` and retry), `64` missing required freshness flags or `--answer`, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` answer recorded (exact replay is an idempotent no-op), `64` conflicting target decision, missing required freshness flags, or missing `--answer`, `70` storage error, `75` stale observation / freshness identity mismatch (re-read `hive plan-review TARGET show --json` and retry) or lock contention.
 - **Effects and approvals:** Records an operator answer on the targeted plan-review finding under freshness CAS (`--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`).
 - **Example:** `hive plan-review my-task answer-finding --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --target-fingerprint f1 --answer "Confirmed" --json`
 
@@ -1619,7 +1619,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` finding approved, `4` stale/conflicting freshness identity, `64` missing required freshness flags, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` finding approved (exact replay is an idempotent no-op), `64` conflicting target decision or missing required freshness flags, `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Approves the targeted plan-review finding under freshness CAS and returns the next observation digest.
 - **Example:** `hive plan-review my-task approve-finding --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --target-fingerprint f1 --json`
 
@@ -1635,7 +1635,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--level`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` level downgraded, `4` stale/conflicting freshness identity, `64` missing freshness flags, invalid `--level`, or missing `--reason`, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` level downgraded (exact replay is an idempotent no-op), `64` conflicting target decision, missing freshness flags, invalid `--level` (valid: `skip`, `standard`, `mandatory`), or missing `--reason`, `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Downgrades the active plan critique level with an audit reason under freshness CAS.
 - **Example:** `hive plan-review my-task downgrade-level --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --level standard --reason "Low risk" --json`
 
@@ -1651,9 +1651,9 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--level`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` level raised, `4` stale/conflicting freshness identity, `64` missing freshness flags or invalid `--level`, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` level raised (exact replay is an idempotent no-op), `64` conflicting target decision, missing freshness flags, or invalid `--level` (valid: `skip`, `standard`, `mandatory`), `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Raises the active plan critique level under freshness CAS.
-- **Example:** `hive plan-review my-task raise-level --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --level strict --json`
+- **Example:** `hive plan-review my-task raise-level --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --level mandatory --json`
 
 ### `hive plan-review TARGET request-review`
 
@@ -1667,7 +1667,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` review requested, `4` stale/conflicting freshness identity, `64` missing freshness flags, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` review requested (exact replay is an idempotent no-op), `64` conflicting target decision or missing freshness flags, `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Requests a new plan critique pass for `TARGET` under freshness CAS.
 - **Example:** `hive plan-review my-task request-review --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --json`
 
@@ -1683,7 +1683,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` linked review started for current generation, `4` review is not stale or freshness identity mismatched, `64` missing freshness flags, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` linked review started for current generation (exact replay is an idempotent no-op), `64` review is not stale, conflicting decision, or missing freshness flags, `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Applies only to a stale review (task generation, plan, or policy changed) and starts a linked review for the current generation.
 - **Example:** `hive plan-review my-task restart --review-id rev1 --task-generation g2 --policy-fingerprint p2 --expected-artifact-digest a2 --json`
 
@@ -1699,7 +1699,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` critique retry admitted, `4` stale/conflicting freshness identity, `64` missing freshness flags, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` critique retry admitted (exact replay is an idempotent no-op), `64` conflicting target decision or missing freshness flags, `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Retries a failed or blocked plan critique generation under freshness CAS.
 - **Example:** `hive plan-review my-task retry --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --json`
 
@@ -1731,7 +1731,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--project`, `--review-id`, `--task-generation`, `--policy-fingerprint`, `--expected-artifact-digest`, `--target-fingerprint`, `--coverage`, `--reason`, `--json`, `--context`
 - **Output:** Text confirmation with next observation digest, or single-document JSON (`hive-plan-review-action.v1`, [schemas/hive-plan-review-action.v1.json](../schemas/hive-plan-review-action.v1.json)) on success and error (`:raise` serialization policy).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` coverage waived, `4` stale/conflicting freshness identity, `64` missing freshness flags, `--coverage`, or `--reason`, `70` storage error, `75` lock contention.
+- **Exits and retry:** `0` coverage waived (exact replay is an idempotent no-op), `64` conflicting decision or missing freshness flags, `--coverage`, or `--reason`, `70` storage error, `75` stale observation / freshness identity mismatch or lock contention.
 - **Effects and approvals:** Records an audited waiver for missing critique lens coverage under freshness CAS.
 - **Example:** `hive plan-review my-task waive-coverage --review-id rev1 --task-generation g1 --policy-fingerprint p1 --expected-artifact-digest a1 --coverage security --reason "Docs only" --json`
 
@@ -2060,16 +2060,16 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive refactor-patrol PROJECT`
 - **Modes:**
-  - **Mode `discover`** (condition: `without --list, --show, --archive, --once`; options: `--dry-run`, `--feature`, `--entrypoint`, `--path`, `--changed-since`, `--pr`, `--job-manifest`, `--result-file`, `--json`, `--context`): Runs architecture-patrol discovery/execution for `PROJECT` (`--changed-since REF` pairs only with `--feature`, `--entrypoint`, or `--path`; emits `hive-refactor-patrol.v4`).
+  - **Mode `discover`** (condition: `without --list, --show, --archive, --once`; options: `--dry-run`, `--feature`, `--entrypoint`, `--path`, `--changed-since`, `--pr`, `--job-manifest`, `--result-file`, `--json`, `--context`): Runs discovery-only architecture patrol for `PROJECT` (`--changed-since REF` pairs only with `--feature`, `--entrypoint`, or `--path`; emits `hive-refactor-patrol.v4`).
   - **Mode `list`** (condition: `--list`; options: `--list`, `--limit`, `--cursor`, `--json`, `--context`): Non-mutating paginated listing of durable architecture-patrol jobs emitting `hive-refactor-patrol-jobs.v2`; pages default to 100 records and the opaque continuation cursor freezes the intake-sequence high-water mark so later arrivals cannot alter page membership.
   - **Mode `show`** (condition: `--show JOB_ID`; options: `--show`, `--limit`, `--full`, `--json`, `--context`): Non-mutating inspection of one job emitting `hive-refactor-patrol-jobs.v2`; defaults to the latest 100 discovery attempts, action claims, and publication attempts per history (`--limit 1..100` narrows it, `--full` opts into complete unbounded histories including all legacy flat patches).
-  - **Mode `archive`** (condition: `--archive JOB_ID`; options: `--archive`, `--json`, `--context`): Archives one durable architecture-patrol job (`hive-refactor-patrol-jobs.v2`).
+  - **Mode `archive`** (condition: `--archive JOB_ID`; options: `--archive`, `--json`, `--context`): Narrow administrative transition archiving a historical action-era job after Patrol Fix import (`hive-refactor-patrol-jobs.v2`).
   - **Mode `once`** (condition: `--once`; options: `--once`, `--dry-run`, `--json`, `--context`): Runs one bounded external-scheduler architecture-patrol pass and emits `hive-one-shot.v1`.
 - **Options:** `--dry-run`, `--feature`, `--entrypoint`, `--path`, `--changed-since`, `--pr`, `--job-manifest`, `--result-file`, `--list`, `--show`, `--archive`, `--limit`, `--cursor`, `--full`, `--once`, `--json`, `--context`
 - **Output:** Text report, or single-document JSON per mode: `discover` emits `hive-refactor-patrol.v4` ([schemas/hive-refactor-patrol.v4.json](../schemas/hive-refactor-patrol.v4.json)), `list`/`show`/`archive` emit `hive-refactor-patrol-jobs.v2` ([schemas/hive-refactor-patrol-jobs.v2.json](../schemas/hive-refactor-patrol-jobs.v2.json)), and `once` always emits `hive-one-shot.v1` ([schemas/hive-one-shot.v1.json](../schemas/hive-one-shot.v1.json)).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` succeeded, `64` unknown project/job, invalid `--limit`/`--cursor`, or conflicting mode flags, `70` discovery/action failure, `75` live owner/claim contention (retryable; incomplete discovery uses 60s retry, token/turn limit uses 1h cooldown), `78` config error.
-- **Effects and approvals:** `list`, `show`, and `--dry-run` are read-only; `archive` marks the job archived; `discover` and `once` claim/run architecture-patrol theses and confined auto-fix/PR or issue fallback when enabled.
+- **Exits and retry:** `0` succeeded, `64` unknown project/job, invalid `--limit`/`--cursor`, or conflicting mode flags, `70` discovery failure, `75` live owner/claim contention (retryable; incomplete discovery uses 60s retry, token/turn limit uses 1h cooldown), `78` config error.
+- **Effects and approvals:** Discovery-only (`list`, `show`, and `--dry-run` are read-only; `archive` closes a historical action-era job); `discover` and `once` route evidence-backed theses to `fix`/`discuss`/`dismiss` and reserve accepted dispositions in the shared Patrol Fix admission store without implementing fixes, filing issues, or opening PRs.
 - **Example:** `hive refactor-patrol my-project --list --limit 50 --json`
 
 ### `hive reject-finding`
@@ -2234,10 +2234,10 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
   - **Mode `service_opt_out`** (condition: `--no-service without --no-bootstrap`; options: `--yes`, `--service`, `--no-init`, `--install-command-receipts`, `--json`, `--context`): Performs runtime/web-bundle/enrollment provisioning while only observing any existing web service without installing, stopping, or disabling one.
   - **Mode `diagnose_only`** (condition: `--no-bootstrap`; options: `--no-bootstrap`, `--service`, `--no-init`, `--yes`, `--install-command-receipts`, `--json`, `--context`): Strictly read-only diagnosis suppressing all provisioning and state writes.
 - **Options:** `--yes`, `--service`, `--no-bootstrap`, `--no-init`, `--install-command-receipts`, `--json`, `--context`
-- **Output:** Human-readable setup checklist, or single-document JSON (`hive-setup.v1`, [schemas/hive-setup.v1.json](../schemas/hive-setup.v1.json)) keeping `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct.
+- **Output:** Human-readable setup checklist, or single-document JSON (`hive-setup.v1`, [schemas/hive-setup.v1.json](../schemas/hive-setup.v1.json)) keeping `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct (including pre-dispatch usage errors). Encoded directly with `JSON.generate`; serialization failure propagates with no prose or fallback JSON document.
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` setup or diagnosis succeeded (idempotent on re-run), `1` incomplete/failed provisioning step, `64` invalid flags or declined non-interactive consent, `70` service/runtime failure, `78` config error.
-- **Effects and approvals:** `diagnose_only` is read-only. Default setup writes loopback-only config/runtime/services and never creates LAN/public exposure; `--yes` confirms unattended setup steps.
+- **Exits and retry:** `0` setup or diagnosis succeeded (idempotent on re-run), `1` incomplete/failed provisioning step or hard diagnostic failure, `64` invalid flags or unattended/JSON run without `--yes` (`classification: "consent_required"`, stopping before diagnostics and mutations), `70` service/runtime failure, `78` config error or `--install-command-receipts` requested on a build without a pinned compatible rollback package/deployment.
+- **Effects and approvals:** `diagnose_only` is read-only. Default setup writes loopback-only config/runtime/services and never creates LAN/public exposure; `--yes` confirms unattended setup steps without implying `--install-command-receipts`.
 - **Example:** `hive setup --no-bootstrap --json`
 
 ### `hive setup-agents`
@@ -2250,9 +2250,9 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive setup-agents`
 - **Options:** `--yes`, `--agent`, `--skill`, `--json`, `--context`
-- **Output:** Preview table and re-verified outcome text, or single-document JSON (`hive-setup-agents.v1`, [schemas/hive-setup-agents.v1.json](../schemas/hive-setup-agents.v1.json)) reporting per-operation status (`planned`, `skipped`, `succeeded`, `failed`). JSON mode writes only its single document to stdout and never prompts.
+- **Output:** Preview table and re-verified outcome text, or single-document JSON (`hive-setup-agents.v1`, [schemas/hive-setup-agents.v1.json](../schemas/hive-setup-agents.v1.json)) reporting per-operation status (`planned`, `skipped`, `succeeded`, `failed`). JSON mode writes only its single document to stdout, never prompts, and encodes directly (`JSON::GeneratorError` propagates with no prose or fallback JSON document).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` all targeted skills healthy or provisioned (matching installs are no-ops; retries re-inspect and schedule only unresolved work), `1` an attempted operation failed or an actionable residual remains, `64` consent declined or planned mutation requested in `--json`/non-TTY mode without `--yes`, `78` invalid manifest, effective config, or `--agent`/`--skill` filter.
+- **Exits and retry:** `0` all available targeted skills healthy or provisioned (matching installs are no-ops; unavailable agents are non-blocking skips; retries re-inspect and schedule only unresolved work), `1` an attempted operation failed or an actionable residual remains, `64` consent declined or planned mutation requested in `--json`/non-TTY mode without `--yes` (refused before native discovery even if already healthy), `78` invalid manifest, effective config, or `--agent`/`--skill` filter.
 - **Effects and approvals:** Previews exact argv arrays and Hive-owned paths before executing native skill provisioning for configured Claude, Codex, Pi, Grok, OpenCode, Muse, and Agy agents; prompts once on TTY or requires `--yes` unattended.
 - **Example:** `hive setup-agents --agent claude --skill ce-brainstorm --yes --json`
 
@@ -2283,7 +2283,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive status`
 - **Modes:**
-  - **Mode `running`** (condition: `no --operational and no --diagnose`; options: `--project`, `--json`, `--context`): Local default polls bounded daemon health and identity-verified live tasks (`hive-running-status.v2`, with explicit scan/output truncation). Under a remote context, GETs `/status` (accepting `--project` and remote-only `--cursor HANDLE` pagination; note R12 follow-up: `--cursor` is accepted by remote preflight but not declared on local Thor `Hive::CLI#status`) and emits `hive-remote.v1`.
+  - **Mode `running`** (condition: `no --operational and no --diagnose`; options: `--project`, `--json`, `--context`): Local default polls bounded daemon health and identity-verified live tasks (`hive-running-status.v2`, capped at 32 rows / 64 KiB with explicit truncation; plain local `hive status` ignores `--project`). Under a remote context, GETs `/status` (accepting `--project` and remote-only `--cursor HANDLE` pagination; note R12 follow-up: `--cursor` is accepted by remote preflight but not declared on local Thor `Hive::CLI#status`) and emits `hive-remote.v1`.
   - **Mode `operational`** (condition: `--operational`; options: `--operational`, `--project`, `--json`, `--context`): Local-only inspection of the active workflow queue, blocker ownership, cooldowns, and fresh safe next actions (`hive-operational-status.v5`). Rejected under a remote context before any HTTP request with exit `64` (`remote status does not support --operational; use status --json or --context local`).
   - **Mode `diagnose`** (condition: `--diagnose SLUG without --write`; options: `--diagnose`, `--project`, `--stage`, `--json`, `--context`): Local-only read-only diagnostic bundle for one task (`hive-status-diagnose.v2`). Rejected under a remote context with exit `64`.
   - **Mode `diagnose_write`** (condition: `--diagnose SLUG --write`; options: `--diagnose`, `--write`, `--force`, `--project`, `--stage`, `--json`, `--context`): Local-only diagnostic capture that persists the diagnostic artifact for `SLUG` (`--force` overwrites an existing diagnostic file) and emits `hive-status-diagnose.v2`. Rejected under a remote context with exit `64`.
@@ -2305,8 +2305,8 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
   - `hive task TARGET`
 - **Options:** `--project`, `--log`, `--diff`, `--artifacts`, `--artifact`, `--output`, `--json`, `--context`
 - **Output:** Locally, text workspace summary or success-only single-document JSON (`hive-task-workspace.v2`, [schemas/hive-task-workspace.v2.json](../schemas/hive-task-workspace.v2.json) on success; local failures print to stderr without a JSON error envelope). Remotely, prints selected content/JSON or emits single-document JSON (`hive-remote.v1`, [schemas/hive-remote.v1.json](../schemas/hive-remote.v1.json)) on both success and failure.
-- **Context behavior:** Local accepts `--project` and `--log` and refuses remote-only selectors (`--diff`, `--artifacts`, `--artifact`, `--output`) before runtime with exit `64` (`these task selectors require --context <remote>; use the local hive task TARGET --json artifact panel`). Remote accepts `--project` and at most one content selector (`--log`, `--diff`, `--artifacts`, or `--artifact ID`), plus `--output PATH` (which requires a content selector and performs an explicit local binary file write to `PATH`).
-- **Exits and retry:** `0` inspected (and written when remote `--output PATH` is given), `64` unknown task, multiple content selectors, local use of remote-only selectors, `--output` without a selector, or unwritable `--output` destination, `69` remote transport error, `70` read error.
+- **Context behavior:** Local accepts `--project` and `--log` (rejecting `--log --json` with exit `64`: `--log cannot be combined with --json`) and refuses remote-only selectors (`--diff`, `--artifacts`, `--artifact`, `--output`) before runtime with exit `64` (`these task selectors require --context <remote>; use the local hive task TARGET --json artifact panel`). Remote accepts `--project` and at most one content selector (`--log`, `--diff`, `--artifacts`, or `--artifact ID`), plus `--output PATH` (which requires a content selector and performs an explicit local binary file write to `PATH`; remote `--log --json` is allowed).
+- **Exits and retry:** `0` inspected (and written when remote `--output PATH` is given), `64` unknown task, local `--log --json`, multiple content selectors, local use of remote-only selectors, `--output` without a selector, or unwritable `--output` destination, `69` remote transport error, `70` read error.
 - **Effects and approvals:** Read-only except when remote `--output PATH` explicitly writes the fetched log/diff/artifact bytes to local `PATH`.
 - **Example:** `hive task demo:my-task --artifact report --output ./report.txt --context prod`
 
@@ -2423,7 +2423,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Output:** Human-readable removal log; `--json` is ignored (text-only).
 - **Context behavior:** Local only; remote context exits `64`.
 - **Exits and retry:** `0` user registrations/services/runtime files removed, `64` invalid flags or unsafe purge rejected, `70` service/filesystem error, `78` malformed config.
-- **Effects and approvals:** Stops and removes per-user Hive services, global registrations, and runtime files without destroying project work; `--purge` removes global config/state, and `--force-purge-state` overrides state-safety guards.
+- **Effects and approvals:** Stops and removes per-user Hive services, global registrations, XDG config/cache, versioned bash payloads, and managed user symlinks while preserving accumulated Hive state and project `.hive-state/` directories by default; `--purge` runs non-interactively while still preserving state; `--force-purge-state` is the explicit destructive path that deletes accumulated Hive state and registered project `.hive-state/` directories (failing closed if managed-service removal is busy or unverified).
 - **Example:** `hive uninstall`
 
 ### `hive update`
@@ -2468,9 +2468,9 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive watch [TARGET...]`
 - **Options:** `--project`, `--until`, `--timeout`, `--interval`, `--max-events`, `--json-lines`, `--json`, `--context`
-- **Output:** Human-readable semantic transition stream, or JSON Lines via `--json-lines` emitting one `hive-watch-event.v1` ([schemas/hive-watch-event.v1.json](../schemas/hive-watch-event.v1.json)) JSON object per line. Explicitly rejects inherited `--json` with exit `64`, empty stdout, and stderr guidance pointing callers to `--json-lines`.
+- **Output:** Human-readable semantic transition stream, or JSON Lines via `--json-lines` emitting one `hive-watch-event.v1` ([schemas/hive-watch-event.v1.json](../schemas/hive-watch-event.v1.json)) JSON object per line (`initial`, `transition`, `source_warning`, `final`). Each JSON Lines event is encoded directly; a serialization failure propagates with no prose or fallback line. Explicitly rejects inherited `--json` with exit `64`, empty stdout, and stderr guidance pointing callers to `--json-lines`.
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` `--until` target state reached (`settled` by default) or bounded event limit reached cleanly, `64` `--json` passed instead of `--json-lines` or invalid target/interval/timeout/until values, `70` observation error, `75` `--timeout` expired before target state settled (retryable).
+- **Exits and retry:** `0` requested `--until` target state (`settled` by default, or `completion`), bounded `--timeout`, or `--max-events` cap reached cleanly (timeout and event-cap finals are successful bounded observations, not task success claims; a closed downstream pipe also exits `0`), `64` `--json` passed instead of `--json-lines`, invalid target/interval/timeout/max-events/until values, unknown project, >100 targets, or ambiguous target, `69` initial status source unavailable/timed out, incomplete task graph, or 3 consecutive poll failures / unexplained task disappearances (`status_unavailable` final event), `130` / `143` `SIGINT` / `SIGTERM` after emitting a final `interrupted` / `terminated` event.
 - **Effects and approvals:** Strictly read-only polling observer (defaults: `--interval 15`, `--timeout 1800`, `--max-events 100`, `--until settled`).
 - **Example:** `hive watch demo:my-task --until settled --json-lines`
 
@@ -2500,7 +2500,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive web capture`
 - **Options:** `--task-folder`, `--source-root`, `--json`, `--context`
-- **Output:** Human-readable capture summary, or single-document JSON (`hive-artifact-capture.v2`, [schemas/hive-artifact-capture.v2.json](../schemas/hive-artifact-capture.v2.json)) when `--json` is passed.
+- **Output:** Human-readable capture summary, or success-only single-document JSON (`hive-artifact-capture.v2`, [schemas/hive-artifact-capture.v2.json](../schemas/hive-artifact-capture.v2.json)) when `--json` is passed (failures report on stderr without a JSON error envelope).
 - **Context behavior:** Local only; remote context exits `64`.
 - **Exits and retry:** `0` capture completed, `64` missing/invalid `--task-folder` or dirty `--source-root`, `70` capture execution failure.
 - **Effects and approvals:** Captures release/UI evidence artifacts for an artifacts-stage `--task-folder` from an exact clean `--source-root` worktree.
@@ -2515,11 +2515,11 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Context posture:** `local_only`
 - **Signatures:**
   - `hive web capture-server`
-- **Options:** `--source-root`, `--runtime-root`, `--control-fd`, `--lifecycle-token`, `--json`, `--context`
+- **Options:** `--source-root`, `--runtime-root`, `--control-fd`, `--lifecycle-token`, `--port`, `--json`, `--context`
 - **Output:** Always emits a single-document readiness/lifecycle JSON line (`hive-web-capture-runtime.v1`, [schemas/hive-web-capture-runtime.v1.json](../schemas/hive-web-capture-runtime.v1.json)) on stdout; inherited `--json` is accepted without changing the contract.
 - **Context behavior:** Local only; remote context exits `64`.
 - **Exits and retry:** `0` capture server exited cleanly after control-fd close, `64` missing/invalid `--source-root`, `--runtime-root`, `--control-fd`, or `--lifecycle-token`, `70` server boot failure.
-- **Effects and approvals:** Runs an isolated ephemeral Rails capture server bound to the recorder's private `--runtime-root` and inherited `--control-fd`.
+- **Effects and approvals:** Runs an isolated ephemeral Rails capture server (default `--port 0`) bound to the recorder's private `--runtime-root` and inherited `--control-fd`.
 - **Example:** `hive web capture-server --source-root /path/to/repo --runtime-root /tmp/cap --control-fd 3 --lifecycle-token tok_1`
 
 ### `hive web install`
@@ -2531,11 +2531,11 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Context posture:** `local_only`
 - **Signatures:**
   - `hive web install`
-- **Options:** `--force`, `--json`, `--context`
-- **Output:** Human-readable installation status, or single-document JSON (`hive-web-install.v1`, [schemas/hive-web-install.v1.json](../schemas/hive-web-install.v1.json)) on success and error.
+- **Options:** `--force`, `--no-bootstrap`, `--json`, `--context`
+- **Output:** Human-readable installation status, or single-document JSON (`hive-web-install.v1`, [schemas/hive-web-install.v1.json](../schemas/hive-web-install.v1.json)) on success and error (`bootstrap_failed`, `service_install_failed`, pre-dispatch `invalid_task_path`). Encoded directly via `JSON.generate`: a serialization failure propagates and no prose or fallback JSON document is emitted.
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` installed, upgraded, unchanged, or unsupported manager, `64` drifted existing service unit without `--force` (retry with `--force`) or invalid arguments, `70` service-manager or bundle install failure, `78` config error.
-- **Effects and approvals:** Installs or refreshes the managed web bundle and per-user web service unit; `--force` refreshes the managed bundle and overwrites a differing unit after saving a backup.
+- **Exits and retry:** `0` installed, upgraded, or unchanged AND service became ready within the bounded health-probe window (40 samples × 250ms), `1` service unready (`ok: false`, e.g. `inactive`, `active_not_ready`, or `manager_unavailable`) or ordinary bootstrap/service failure, `64` drifted existing service unit without `--force` (retry with `--force`) or invalid arguments, `78` invalid web configuration.
+- **Effects and approvals:** Installs or refreshes the managed web bundle (suppressed authoritatively by `--no-bootstrap`, even with `--force`) and per-user web service unit; `--force` refreshes the managed bundle and overwrites a differing unit after saving a backup.
 - **Example:** `hive web install --force --json`
 
 ### `hive web start`
@@ -2567,9 +2567,9 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Signatures:**
   - `hive web status`
 - **Options:** `--json`, `--context`
-- **Output:** Human-readable web service and readiness summary, or single-document JSON (`hive-web-status.v1`, [schemas/hive-web-status.v1.json](../schemas/hive-web-status.v1.json)) keeping `mode`, effective `url`, compatibility `warnings`, and service installed/enabled/running/readiness distinct.
+- **Output:** Human-readable web service and readiness summary, or single-document JSON (`hive-web-status.v1`, [schemas/hive-web-status.v1.json](../schemas/hive-web-status.v1.json)) keeping `mode`, effective `url`, compatibility `warnings`, producer `runtime`, and service installed/enabled/running/readiness distinct on success and error. Encoded directly via `JSON.generate`: a serialization failure propagates and no prose or fallback JSON document is emitted.
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` status reported, `64` invalid arguments, `70` probe error, `78` malformed config.
+- **Exits and retry:** `0` status reported (single immediate health sample), `1` ordinary probe failure, `64` invalid arguments, `78` malformed web configuration.
 - **Effects and approvals:** Strictly read-only observation without mutation or bootstrap.
 - **Example:** `hive web status --json`
 
@@ -2601,7 +2601,7 @@ Historical state conversion is an offline agent task; see [docs/guides/current-f
 - **Options:** `--check`, `--json`, `--context`
 - **Output:** Human-readable log-compilation status; `--json` is ignored (text-only).
 - **Context behavior:** Local only; remote context exits `64`.
-- **Exits and retry:** `0` `wiki/log.md` rebuilt or verified up to date (`--check`), `1` `--check` detected out-of-date `wiki/log.md`, `64` invalid project path or subcommand, `70` filesystem error.
+- **Exits and retry:** `0` `wiki/log.md` rebuilt or verified up to date (`--check`), `64` `--check` detected stale `wiki/log.md`, missing `wiki/` directory, invalid project path, or unknown subcommand, `70` filesystem error.
 - **Effects and approvals:** Without `--check`, deterministically rebuilds `wiki/log.md` from `wiki/log.d/*.md` fragments plus legacy log body; `--check` is read-only.
 - **Example:** `hive wiki compile-log --check`
 

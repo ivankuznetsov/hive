@@ -7,6 +7,8 @@ updated: 2026-09-02
 tags: [command, wiki, changelog, generated]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-wiki-compile-log) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive wiki compile-log [PROJECT_PATH]` rebuilds `wiki/log.md`
 from per-change fragments under `wiki/log.d/*.md` plus real legacy
 changelog entries. Fresh template prose is dropped instead of preserved
@@ -30,35 +32,6 @@ section. Legacy extraction starts at the first `## ` entry after the
 header; if a fresh wiki template contains prose but no entries, that
 prose is discarded. Re-running the compiler is idempotent and does not
 duplicate entries already inside the generated block.
-
-## Commands
-
-| Command | Behavior |
-|---------|----------|
-| `hive wiki compile-log` | Regenerate `wiki/log.md` in the current project. |
-| `hive wiki compile-log PATH` | Regenerate another checkout's changelog. |
-| `hive wiki compile-log --check` | Exit non-zero if `wiki/log.md` is stale. |
-
-The command exits with `Hive::InvalidTaskPath` / EX_USAGE when the
-project has no `wiki/` directory or when `--check` finds stale output.
-
-## Options
-
-`hive wiki compile-log --check` reports whether the compiled log is current
-without rewriting it. Omit `--check` to compile the log.
-
-## Output, exceptions, and exit codes
-
-The command has no JSON mode or schema. Output is human-readable text, so JSON
-serialization and a serialization fallback are not applicable. `compile-log`
-writes the generated aggregate; `--check` is the read-only exception and emits
-an error without modifying a stale file.
-
-| Code | Meaning |
-|---:|---|
-| 0 | Compilation completed, or `--check` found the aggregate current. |
-| 64 | The subcommand/project was invalid, the wiki was absent, or `--check` found stale output. |
-| 1 | An unclassified filesystem/compiler failure escaped the command. |
 
 ## OpenClaw Wrapper
 

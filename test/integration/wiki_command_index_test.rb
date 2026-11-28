@@ -17,13 +17,14 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
 
     assert status.success?, "bin/hive help failed (#{status.exitstatus}): #{stderr}"
 
-    guard = WikiCommandIndex::Guard.new(wiki_root: WIKI_ROOT, expected_owners: nil)
+    guard = WikiCommandIndex::Guard.new(wiki_root: WIKI_ROOT)
     index_text = File.read(File.join(WIKI_ROOT, "cli.md"))
     first = guard.evaluate(help_text: stdout, index_text: index_text)
     second = guard.evaluate(help_text: stdout, index_text: index_text)
 
     assert_equal first, second, "guard result or diagnostic ordering changed across identical runs"
-    assert_empty first.owners
+    assert first.success?, first.diagnostics.map(&:to_s).join("\n")
+    assert_equal WikiCommandIndex::COMMAND_OWNERS, first.owners.slice(*WikiCommandIndex::COMMAND_OWNERS.keys)
 
     metadata = guard.metadata(
       all_commands: Hive::CLI.all_commands,

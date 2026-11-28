@@ -7,28 +7,13 @@ updated: 2026-11-24
 tags: [command, review, recovery, operator]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-review-grant) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 `hive review-grant` records an operator's decision to allow 1–3 additional
 fixes for one `REVIEW_STALE reason=final_fix_unverified` review. Obtain its
 grant evidence token from [[commands/status]]. The decision permits
 normal daemon admission; existing recovery, provider, CI, escalation and
 fix-safety gates still apply.
-
-## Usage
-
-```sh
-hive review-grant TARGET --project PROJECT --passes N --reason TEXT --evidence-token TOKEN [--json]
-```
-
-## Options
-
-`TARGET` is an unambiguous task ID, slug or canonical task folder.
-`--project`, `--passes`, `--reason` and `--evidence-token` are required.
-`--passes` is an explicit decimal integer from 1 through 3, independent of
-`review.max_passes`. Fractional, partially numeric and out-of-range values
-refuse. `--reason` is stripped and normalized at the wire boundary; it must
-contain 1–1024 valid UTF-8 bytes, contain no control characters, and pass
-`Hive::SecretScanner`. Use a non-sensitive explanation. `--json` selects the
-versioned machine-readable envelope.
 
 ## Behavior
 
@@ -106,55 +91,6 @@ denials supplement that shared boundary. The immutable receipt and audit
 capture the verified caller UID and source. This workflow boundary does not
 isolate an operator from a malicious process with unrestricted access as the
 same OS user.
-
-## Examples
-
-```sh
-hive status --operational --json
-hive review-grant 43397 --project hive --passes 2 \
-  --reason "Finish the accepted fixes and verify the result" \
-  --evidence-token TOKEN --json
-```
-
-Refresh status after progress. A further grant requires a new eligible
-final-fix-unverified observation after the extension's mandatory verification.
-
-## Output and schema
-
-`hive review-grant --json` emits the closed `hive-review-grant.v1` schema.
-Success includes `state` (`applied` or `replayed`), stable `decision_id`,
-`passes`, normalized `reason`, original `caller`, `source`, `decided_at`,
-`audit_path` and `remediation`. Replayed output describes the historical
-decision; it does not claim a new allocation or current remaining allowance.
-Read the required nullable `review_grant` field in
-`hive-operational-status.v5` for current derived counts and suspended holds.
-Text output identifies the decision and its result without rendering reason
-text into a shell command.
-
-## Output exceptions
-
-`hive review-grant --json` errors use its versioned error envelope, including
-`error_kind`, `exit_code`, `message` and, for dispatched refusals,
-`refusal_reason` and `remediation`. Thor usage errors use the command's declared
-usage envelope before dispatch. Managed sources refuse as `agent_denied`;
-unverifiable process provenance refuses as `source_unverified`. Missing,
-changed or corrupt evidence never allocates allowance or clears a new marker.
-Shared wrapper/runtime activation failures retain their separate contracts.
-
-## Serialization fallback
-
-For `hive review-grant`, JSON encoding failures propagate rather than emitting
-a second or partial fallback document. An `EPIPE` while emitting the error
-envelope retains the underlying typed failure. Diagnostic and text rendering
-escape untrusted data; reason bytes are audit data and never shell input.
-
-## Exit codes
-
-For `hive review-grant`, exit code `0` means applied or identically replayed.
-Usage, evidence and decision-conflict refusals use `64`; task-lock contention
-uses `75`; configuration errors use `78`. Managed-source refusals use `1`.
-Internal failures retain the shared typed CLI exit code. Success means the
-grant was recorded/applied, not that the review succeeded.
 
 ## Backlinks
 

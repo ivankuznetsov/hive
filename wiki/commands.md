@@ -7,22 +7,7 @@ updated: 2026-11-07
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
-**TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
-`hv` fallback launcher), the opt-in e2e harness, the Hive web command/routes
-documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
-setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
-corpus producer,
-`hive pairing` as the Telegram first-contact approval surface, the read-only
-agent-first `hive status --operational --json`, bounded `hive watch`, closed `hive act`, native
-semantic `hive task` detail, the
-`hive doctor` / consent-safe setup split for one canonical Hive
-operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
-ClawHub `hive-cli` listing whose installed slash command is `/hive`.
-[[cli]] is the navigation-only command-to-owner index. Each linked command or
-module page is the sole authority for that command's syntax, behavior, schema,
-serialization policy, and exits; the surface summaries below are orientation,
-not competing contracts. OpenClaw does not add a second runtime and does not publish
-one ClawHub listing per Hive verb.
+**TLDR**: [docs/cli.md](../docs/cli.md) is the single authoritative public CLI reference for every visible `bin/hive` command, option, JSON/JSON-Lines/text contract, context rule, and exit code. This page orients Hive's external interaction surfaces (Thor CLI via `hive`/`hv`, native `hive setup` and Hive Web, OpenClaw/ClawHub skill projection, and the opt-in `bin/hive-e2e` harness). [[cli]] maps commands to their internal Wiki architecture pages (`wiki/commands/*` and `wiki/modules/*`), which retain controller, storage, and subsystem architecture rather than competing public CLI contracts. OpenClaw does not add a second runtime and does not publish one ClawHub listing per Hive verb.
 
 ## Source Files
 
@@ -56,98 +41,12 @@ one ClawHub listing per Hive verb.
 
 ### Thor CLI
 
-`bin/hive` loads `Hive::CLI` and exposes the public command set documented in
-[[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
-`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), the `hive review --pr` overlay for ad-hoc review of an existing
-GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
-lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
-registry maintenance, Screenote connect/disconnect, the `hive bench submit`
-corpus-submission producer,
-the [[commands/pairing]] Telegram pairing approval surface,
-[[commands/refactor-patrol]] as the language-neutral architecture-patrol
-discovery surface (it routes evidence-backed theses but takes no actions), and
-[[commands/doctor]] read-only managed health reporting,
-[[commands/setup-agents]] consent-safe native provisioning,
-[[commands/task]] as the bounded read-only semantic result/usage/diagnostic
-surface for one exact task,
-`--json` envelopes where the command page says they exist.
-Bare `hive status` and `hive status --json` are the bounded current-liveness
-surface. `--operational --json` selects the v5 agent workflow document with a
-required nullable exact routing decision; `hive task`, `hive tui`, and
-`hive archive` own task detail, fleet browsing, and terminal history.
-[[commands/watch]] emits bounded semantic JSON Lines without shell polling.
-[[commands/context]] selects a named local or remote installation before project
-discovery. Supported remote task operations use the scoped `/api/v1` JSON API;
-[[commands/token]] administers server-local grants and [[commands/operation]]
-queries durable accepted work. [[remote-access]] owns deployment prerequisites
-and incident response. Local filesystem commands require an effective local
-context.
-`hive act` accepts only a fresh observation token for the one closed routine
-workflow-advance action and recomputes the verb under the task lock.
-The wrapper also normalizes command-local help before Thor dispatch:
-`hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
-`hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
-instead of being treated as partially-valid command invocations.
-Wrapper-level JSON booleans are normalized with the same exact grammar Thor
-uses for boolean options. Leading `--json`, `--json=true`/`TRUE`/`t`/`T`, and
-false forms such as `--no-json`, `--skip-json`, or `--json=false` move behind
-the command before dispatch; unsupported assignments such as `--json=1` or
-`--json=yes` fail as usage errors before the assigned value can become a
-command argument or task target. `hive new` is the wrapper-level text-tail
-exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
-`--json=...` tokens are treated as literal task text, with `bin/hive` inserting
-`--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
-errors use the last recognized JSON boolean flag, so `--json --no-json` and
-`--json --json=false` choose human prose instead of an error envelope. When the
-final recognized JSON flag is truthy, pre-dispatch Thor usage contracts declared in each command boundary emit
-command-shaped JSON before stderr, including versioned `hive-setup.v1` usage failures and Screenote connect/disconnect
-missing-`SERVICE` failures.
+`bin/hive` loads `Hive::CLI` and exposes the public command surface documented authoritatively in [docs/cli.md](../docs/cli.md); internal entry-point architecture and per-command implementation targets are indexed in [[cli]]. Key surface groups include:
 
-After dispatch, commands whose published failures use the common
-`Hive::Schemas::ErrorEnvelope` shape route through
-`Hive::Schemas::EnvelopeEmitter`. The mixin owns exception normalization,
-single-document stdout guarding, schema construction, and closed-pipe handling;
-commands supply only their schema, error-kind mapping, and optional fields.
-This covers approve, findings inspection/toggles, marker clearing, run, workflow
-stage actions, status/diagnose, and the existing forget/prune/daemon/drop/ad-hoc
-review producers. Commands with injected output streams, variant schema routing,
-or deliberately different published fields retain dedicated emitters rather
-than changing their wire contracts merely to share implementation.
-
-`bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
-owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
-fall through to common Apache Hive paths. See [[operating]] for install-channel
-behavior.
-
-`hive bench submit SLUG` is a CLI-only bridge from completed Hive tasks to the
-separate hive-bench corpus. It resolves a `9-done` task from registered
-projects, runs a local secret-token preflight, delegates extraction to
-hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
-the hive-bench checkout. See [[commands/bench-submit]].
-
-`hive setup` is the local workstation provisioning bridge for installs that
-`hive setup` is the normal native workstation provisioning bridge: it first
-previews and provisions the bundled Hive operating skill for supported agents,
-then emits a `hive-setup.v1` phase report, installs/repairs Hive-owned QMD and
-authenticated managed web bundle assets, installs the daemon service, enrolls
-the current project unless disabled, and installs/starts/probes the separate
-loopback Hive web service by default. One interactive confirmation covers the
-run; JSON/non-TTY requires `--yes` or performs no mutation. `--no-service` opts
-out of web-service mutation while leaving other approved setup work enabled;
-`--no-bootstrap` is diagnose-only. See
-[[commands/setup]].
-
-`hive pairing` lists and approves Telegram pairing requests minted by unknown
-DM chats that send `/start` while `bot.pairing_enabled: true`. Approval appends
-the chat id to the global bot allowlist, requests a live bot reload, and queues
-an approval DM for the running bot. See [[commands/pairing]] and [[modules/bot]].
-
-`hive connect screenote` and `hive disconnect screenote` manage the operator's
-Screenote OAuth credential for MCP-backed artifact uploads. The connect flow
-uses loopback auth-code + PKCE, lists projects through Screenote MCP, and
-persists the selected default project in `screenote.json`; disconnect revokes
-and clears it. See [[commands/screenote]].
+- Workflow verbs (`new`, `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `decide`) and ad-hoc PR review (`hive review --pr`), plus project workflow and module management ([[commands/workflow]], [[commands/module]]).
+- Native workstation provisioning (`hive setup`, [[commands/setup]]), managed skill inspection/provisioning ([[commands/doctor]], [[commands/setup-agents]]), and loopback Hive web management ([[commands/web]]).
+- Agent-first observation and control (`status`, `task`, `watch`, `act`, `answer`, `approve`, `operation`), local/remote context management ([[commands/context]], [[commands/token]], [[remote-access]]), and daemon/bot/babysitter/patrol operations.
+- Internal shared infrastructure: `Hive::CliArgvPolicy` normalizes wrapper help/boolean/option-lifting grammar before Thor dispatch, `Hive::CliUsageContracts` preserves pre-dispatch structured usage contracts, `Hive::Schemas::EnvelopeEmitter` centralizes post-dispatch envelope framing, and `bin/hv` provides the Apache Hive collision fallback launcher (see [[cli]] and [[operating]]).
 
 ### OpenClaw / ClawHub
 

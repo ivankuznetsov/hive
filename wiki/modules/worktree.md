@@ -7,6 +7,8 @@ updated: 2026-11-07
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-worktree) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: Wrapper around Git worktree lifecycle with a YAML pointer file (`worktree.yml`) inside the task folder, path-prefix validation, an origin-only exact-base path for controller-owned draft-PR workflows, and hardened exact detached analysis materialization through [[modules/agent_git_gate]].
 
 ## Class shape
@@ -256,17 +258,12 @@ than `--json`, `--project`, and `--stage`, so `commit-residue`,
 `discard-residue`, and `repair` stay ineligible. The consumer is hivedev's
 read-only workspace audit.
 
-The mutating verbs are admitted only while the task carries `ERROR
-reason=ensure_clean_on_exit_failed`, the current execute contract's `ERROR
-reason=dirty_worktree`, or the historical `EXECUTE_WAITING
-reason=dirty_worktree`, and they run under the task lock:
-
-```text
-hive worktree commit-residue <slug> [--message "one line"] [--json]
-hive worktree commit-residue <slug> --complete-execute [--json]
-hive worktree discard-residue <slug> [--paths path [path ...]] [--json]
-hive worktree repair <slug> --strategy commit|discard [--json]
-```
+The mutating verbs (`commit-residue`, `discard-residue`, `repair`) are admitted
+only while the task carries `ERROR reason=ensure_clean_on_exit_failed`, the
+current execute contract's `ERROR reason=dirty_worktree`, or the historical
+`EXECUTE_WAITING reason=dirty_worktree`, and they run under the task lock (see
+[docs/cli.md](../../docs/cli.md#hive-worktree) for invocation syntax and
+options).
 
 Ordinary commit recovery reuses the full CleanExit scope, symlink,
 secret-content, and signing policy gates. Owned-pointer validation resolves the
@@ -333,32 +330,6 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 - `Hive::Commands::Worktree` — inspects and repairs residue only through a strictly owned coding worktree pointer.
-
-## CLI serialization and exit codes
-
-`hive worktree --json` uses the shared envelope emitter with serialization
-policy `raise`: `JSON::GeneratorError` is raised and no fallback JSON document
-is emitted.
-
-| Code | Meaning |
-|---:|---|
-| 0 | Status or the guarded repair completed. |
-| 1 | A recovery-state invariant failed outside the typed categories below. |
-| 64 | The subcommand, target, strategy, path list, or message was invalid. |
-| 70 | Worktree ownership, Git, or clean-exit repair failed. |
-| 75 | The task lock was busy or freshness changed concurrently. |
-| 78 | Project/workflow configuration was invalid. |
-
-## Examples
-
-Use `hive worktree status TASK --json` to inspect owned residue. A guarded
-repair is explicit, for example
-`hive worktree repair TASK --strategy commit --json`.
-
-## JSON schema
-
-All machine-readable status and repair results use `hive-worktree.v1`, with
-`schema: "hive-worktree"` and `schema_version: 1` on success and error arms.
 
 ## Tests
 

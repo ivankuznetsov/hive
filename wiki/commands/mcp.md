@@ -7,30 +7,9 @@ updated: 2026-10-15
 tags: [command, mcp, config, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-mcp) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive mcp import` copies the MCP servers you choose from your personal agent configs (Codex, Claude, OpenCode, Pi, Grok) into Hive's global catalog, `mcp.servers` in `~/.config/hive/config.yml`. Hive-launched agents load only catalog servers that a project or stage grants with `mcp.use` (see [[modules/mcp]]). `hive mcp login SERVER --agent AGENT` signs one agent in to an OAuth catalog server so headless launches can reuse the login. Owner module: `Hive::Commands::Mcp`; discovery and writes live in `Hive::Mcp::Discovery` and `Hive::Mcp::Importer`.
-
-## Usage
-
-```
-hive mcp import                         # terminal: table, then choose rows
-hive mcp import --dry-run [--json]      # plan only; writes nothing
-hive mcp import --all --yes             # every `new` row
-hive mcp import --only linear,docs --yes
-hive mcp import --all --update --yes    # also replace `drift` rows
-hive mcp login linear --agent codex     # interactive sign-in for Hive launches
-```
-
-## Options
-
-| Option | Applies to | Meaning |
-|---|---|---|
-| `--all` | import | Select every `new` row, refresh login lists on `imported` rows, and with `--update` also `drift` rows. |
-| `--only IDS` | import | Comma-separated row ids or server names. A `conflict` name needs one of its `NAME@AGENTS` ids. |
-| `--dry-run` | import | Report the selection without writing. |
-| `--update` | import | Allow replacing a catalog entry whose source changed (`drift`). |
-| `--yes` | import | Write without the confirmation question. Required outside a terminal and with `--json`. |
-| `--json` | import | Emit one `hive-mcp-import.v1` document. `login` rejects it. |
-| `--agent AGENT` | login | `codex` or `claude`. Pi cannot receive granted servers; OpenCode and Grok sign-in are not supported yet. |
 
 ## Behavior
 
@@ -41,49 +20,6 @@ hive mcp login linear --agent codex     # interactive sign-in for Hive launches
 5. Writes go through `Hive::Config.update_global_config!` under the global config lock and keep every other key. The new block is validated before it is written.
 6. `login` runs the agent's own flow in the terminal. Codex runs `codex mcp login SERVER` with `-c mcp_servers.SERVER.url=…` (and `oauth_resource`, `--scopes`) so the saved key matches Hive's rendering. Claude runs `claude mcp login SERVER`, which finds the server in Claude's own config. On success the agent is added to the server's `oauth_logins`.
 7. `hive setup` and `hive init` ask once, in a terminal, to import the `new` rows and record `mcp.import_offered: true` whatever the answer. `--yes`, `--json` and non-TTY runs skip the question.
-
-## Examples
-
-```
-$ hive mcp import --dry-run
-#   STATUS        NAME                     SOURCES                TYPE   AUTH
-1   new           linear                   codex                  http   oauth
-2   new           writero                  codex                  http   oauth (signed in: codex)
-3   new           screenote                claude                 http   none
-dry run: would import nothing
-```
-
-## JSON contract (`schema = "hive-mcp-import"`, version 1)
-
-`hive mcp import --json` emits one document; resolve the schema with `Hive::Schemas.schema_path("hive-mcp-import")`.
-
-```json
-{
-  "schema": "hive-mcp-import", "schema_version": 1, "ok": true, "action": "import",
-  "dry_run": false, "catalog_path": "/home/me/.config/hive/config.yml",
-  "written": ["linear"],
-  "rows": [{"id": "linear", "name": "linear", "status": "new", "sources": ["codex"],
-            "transport": "http", "auth": "oauth", "logins": [], "exports": [],
-            "refusal": null, "selected": true}],
-  "notices": ["grok skipped: /home/me/.grok/config.toml is not readable"]
-}
-```
-
-`exports` lists variable names only. Rows never carry credential values.
-
-## Errors
-
-Failures emit the error arm: `ok: false`, `error_class`, `error_kind`, `exit_code`, `message`, and `action` when the subcommand was named. `error_kind` is one of `usage`, `consent_required` (a write without `--yes`, `--all`/`--only`, or a terminal), `config` (malformed global config), `agent` (the sign-in did not complete), `internal`. Pre-dispatch Thor rejections use the same schema with `error_kind: "usage"`. If the error document itself cannot be serialized, the command warns on stderr and re-raises the original failure.
-
-## Exit codes
-
-| Exit | Meaning |
-|---|---|
-| 0 | Import reported or written; login recorded |
-| 1 | `login`: the agent's sign-in did not complete |
-| 64 | Usage error or consent required |
-| 70 | Internal error |
-| 78 | Malformed global config |
 
 ## Backlinks
 

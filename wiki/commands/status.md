@@ -7,6 +7,8 @@ updated: 2026-11-20
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-status) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive status` answers the ordinary operational question—whether the
 daemon is alive and what is running now—without constructing every task's
 workflow history. `hive status --json` emits the bounded
@@ -20,18 +22,7 @@ For a named remote context, use `hive status --context NAME --json` and follow
 Remote status rejects `--operational` and reports unavailable project loads
 explicitly. See [[remote-access]] for its bounded page and authority contract.
 
-## Mode contract
-
-| Invocation | Contract |
-|---|---|
-| `hive status` | Bounded human daemon/liveness snapshot. It lists live work only, so it always ends its task block with `Waiting, blocked, and queued work: hive status --operational`; `NO RUNNING TASKS` does not mean nothing is waiting on the operator. |
-| `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
-| `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v5` agent document. It includes required active runtime identity, the nullable stateless routing decision, and complete dependency fan-in state; superseded v1-v4 are removed. |
-| `hive status --operational [--json] --project NAME` | The same view, text or JSON, scoped to one registered project (see [Project scope](#project-scope)). An unknown or empty name is a usage error (exit 64). |
-| `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
-| `hive task TARGET --json` | Detailed semantic workspace for one task. |
-| `hive archive [--json]` | Retention-unfiltered terminal history. |
+## Internal graph transport and project scope
 
 The daemon consumes the internal task graph directly from
 `Status#internal_task_graph_payload` in the same Ruby process. It does not invoke
@@ -85,7 +76,7 @@ The JSON document carries the additive optional `scope: { "project": NAME }`.
 Its absence means every registered project. The human heading appends
 ` · project NAME`.
 
-## Usage and examples: act
+## Operational review grants and actions
 
 Operational task rows include the required nullable `review_grant` field in
 `hive-operational-status.v5`. For an evidenced
@@ -104,30 +95,6 @@ summaries have zero usable allowance. Missing or changed evidence leaves
 not create budget files or reconstruct grants from historical audit. The
 `workflow.grant_fix_passes` advertisement is outside routine `hive act`'s
 executable actions. Closure remains a separate operator option.
-
-`hive act ACTION_ID TARGET --observation TOKEN --json` executes one fresh
-routine action issued by operational status. For example, use
-`hive act workflow.retry demo:task --observation TOKEN --json` only with the
-exact `action_id`, target, and opaque token from the current status document; a
-stale or invented action is refused.
-
-## Output exceptions, serialization, and exit codes
-
-Status uses `hive-running-status.v2`, `hive-status-diagnose.v2`, or
-`hive-operational-status.v5` according to the selected mode; act uses
-`hive-act.v2`. Invalid arguments and stale/refused actions emit the selected
-typed error surface. Status suppresses a `JSON::GeneratorError` while encoding
-an error so the original typed error controls the exit, while act propagates
-the generator exception and emits no fallback JSON. Success exits `0`; usage
-errors exit `64`, temporary/stale observations exit `75`, and configuration
-errors exit `78`.
-
-## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
-
-| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
-|---|---|---|---|---|---|---|
-| `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v5`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
-| `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 
 ## Runtime database contention
 

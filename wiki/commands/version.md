@@ -7,60 +7,19 @@ updated: 2026-09-02
 tags: [command, version, runtime, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-version) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive version` reports the release version; JSON mode additionally
 identifies the active runtime channel, display version, build SHA, and
 deployment.
 
-## Usage
+## Implementation
 
-```bash
-hive version [--json]
-hive --version
-hive -v
-```
-
-## Options and aliases
-
-- `hive version --json` emits the versioned machine contract.
-- Exact top-level `--version` and `-v` invocations are wrapper aliases that
-  print the release semantic version as text and exit before Thor dispatch.
-
-No other command-specific options apply.
-
-## Behavior
-
-Human output is `Hive::VERSION` followed by a newline. JSON output captures
-`Hive::RuntimeIdentity`, allowing dogfood and installed releases to share the
-same release semantic version while exposing their actual loaded build and
-deployment identity.
-
-## Output and schema
-
-`hive version --json` emits `hive-version.v1` with `ok: true` and a `runtime`
-object containing `channel`, `release_version`, `display_version`, `build_sha`,
-and `deployment_id`. Exact top-level `--version` and `-v` aliases are text-only.
-
-## Error and serialization policy
-
-The JSON payload contains only registry/version and normalized runtime identity
-values and is serialized directly with `JSON.generate`. No command-specific
-fallback document or generator-error suppression applies.
-
-## Exit codes
-
-| Code | Meaning |
-|---:|---|
-| 0 | Version text or the v1 JSON document emitted. |
-| 1 | JSON serialization failed before a document could be emitted. |
-| 64 | The `version` invocation was malformed. |
-
-## Examples
-
-```bash
-hive version
-hive version --json
-hive --version
-```
+Human output is `Hive::VERSION` followed by a newline, with exact top-level
+`--version` and `-v` shortcuts handled in `bin/hive` before Thor dispatch. JSON
+output captures `Hive::RuntimeIdentity`, allowing dogfood and installed
+releases to share the same release semantic version while exposing their actual
+loaded build and deployment identity.
 
 ## Tests
 

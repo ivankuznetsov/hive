@@ -7,16 +7,9 @@ updated: 2026-09-02
 tags: [command, registry, cleanup, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-prune) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive prune [--dry-run] [--json]` drops every registry entry in `~/Dev/hive/config.yml` whose `path` no longer points at a directory on disk, whose stored `real_path` no longer matches the current target, **or** whose row shape is invalid (non-Hash, missing `path`, non-String name/path — all hand-edit accidents). The project's `.hive-state` directory on disk (when present) is **not** touched. Bulk version of [[commands/forget]] for the common-case `mktemp -d`-style stale-entry pile-up.
-
-## Usage
-
-```
-hive prune                  # text output, rewrites config.yml
-hive prune --dry-run        # show what would be dropped, do not write
-hive prune --json           # machine-readable envelope
-hive prune --dry-run --json # both
-```
 
 ## Why
 
@@ -31,48 +24,6 @@ Malformed rows from a hand-edited `config.yml` (e.g., a non-Hash entry or a row 
 3. Partition entries: drop rows where the shape is invalid, `File.directory?(path)` is false, or a stored `real_path` no longer matches the current target of that path.
 4. With `--dry-run`: return `{removed:, kept_count:}` without writing.
 5. Without `--dry-run`: rewrite `config.yml` with the kept rows.
-
-## JSON contract (`schema = "hive-prune"`, version 1)
-
-### Success
-
-```json
-{
-  "schema": "hive-prune",
-  "schema_version": 1,
-  "ok": true,
-  "dry_run": false,
-  "removed": [
-    {"name": "stale", "path": "/tmp/gone", "hive_state_path": "/tmp/gone/.hive-state"}
-  ],
-  "removed_count": 1,
-  "kept_count": 3
-}
-```
-
-### Error envelope
-
-```json
-{
-  "schema": "hive-prune",
-  "schema_version": 1,
-  "ok": false,
-  "error_class": "ConfigError",
-  "error_kind": "config",
-  "exit_code": 78,
-  "message": "global config at /home/me/Dev/hive/config.yml is not valid YAML: ..."
-}
-```
-
-`error_kind` enum (closed, mirrors `Hive::Schemas::PruneErrorKind::ALL`):
-
-| `error_kind` | Exit | Cause |
-|---|---|---|
-| `usage` | 64 | reserved for future flag-validation; pre-declared so v1 absorbs it without a v2 bump |
-| `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |
-| `internal` | 70 | uncategorised crash |
-
-External consumers validate against `schemas/hive-prune.v1.json`; resolve via `Hive::Schemas.schema_path("hive-prune")`. Pre-dispatch usage failures use the same envelope with `error_kind: "usage"`. If command-level error-envelope encoding raises `JSON::GeneratorError`, prune warns on stderr, emits no substitute document, and re-raises the original typed failure.
 
 ## Symlink semantics
 

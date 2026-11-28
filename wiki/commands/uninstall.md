@@ -7,17 +7,9 @@ updated: 2026-09-02
 tags: [command, install, uninstall, xdg]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-uninstall) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive uninstall` removes user-scoped Hive registrations, service units, cache/config, versioned bash payloads, and user symlinks while preserving accumulated work by default.
-
-## Usage
-
-```bash
-hive uninstall
-hive uninstall --purge
-hive uninstall --force-purge-state
-```
-
-`--purge` is non-interactive but still preserves state. `--force-purge-state` is the explicit destructive path that removes accumulated Hive state and registered project `.hive-state` directories.
 
 ## Cleanup sequence
 
@@ -58,19 +50,6 @@ but it still fails closed before deletion when managed-service removal is busy
 or unverified.
 
 When `HIVE_HOME` is set, `Hive::Paths.hive_home_collapsed?` is true. In that shape config, data, state, and cache all point at one directory, so uninstall skips broad config/cache/data deletion unless `--force-purge-state` is explicit.
-
-## Output, serialization, and exit codes
-
-Uninstall has no success JSON mode or command schema. It reports the cleanup
-plan, preservation decisions, and best-effort service warnings as human text,
-so JSON serialization and a serialization fallback are not applicable.
-
-| Code | Meaning |
-|---:|---|
-| 0 | Cleanup completed; individual best-effort service warnings may still have been reported. |
-| 1 | An ownership/safety invariant or non-best-effort cleanup operation failed. |
-| 64 | The public argument shape was invalid. |
-| 78 | Configuration needed for a non-best-effort boundary was invalid. |
 
 ## Tests
 

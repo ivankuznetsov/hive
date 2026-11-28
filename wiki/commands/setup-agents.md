@@ -7,6 +7,8 @@ updated: 2026-11-04
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-setup-agents) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive setup-agents` provisions the bundled Hive operating skill for
 Claude, Codex, Pi, OpenCode, Muse, and Antigravity CLI (`agy`) plus unresolved built-in native
 capabilities for those agents and Grok. Grok currently participates through
@@ -20,30 +22,9 @@ state, publishes whole skill directories or uses supported native package
 operations, and reinspects the result. It never provisions arbitrary custom
 skills or replaces user-owned conflicts.
 
-## Usage
-
-```bash
-hive setup-agents
-hive setup-agents --agent claude --skill ce-brainstorm
-hive setup-agents --agent grok --skill ce-code-review
-hive setup-agents --yes
-hive setup-agents --yes --json
-```
-
-`--agent` and `--skill` are array/repeatable filters over effective managed
-targets. Unknown filters and filters that select unmanaged custom skills fail
-before mutation. Package prerequisites are added recursively after filtering,
-so a narrow request cannot omit a required package. A prerequisite that cannot
-be inspected, repaired, or proven healthy blocks its dependent operation. With
-no filters, setup addresses every unresolved managed capability in the
-effective coding configuration plus the bundled `hive` capability for every
-agent declared by that bundled package. Filtering to Claude, Codex, or Pi
-retains that agent's Hive operating skill. Grok is native-capability-only, so
-its targets come from effective stage/reviewer configuration. OpenClaw is
-deliberately not a setup target: its native/ClawHub state is diagnosed
-read-only and installed through OpenClaw itself.
-
 ## Consent and lifecycle
+
+`--agent` and `--skill` filter over effective managed targets; package prerequisites are added recursively after filtering so a narrow request cannot omit a required package. OpenClaw is deliberately not a setup target: its native/ClawHub state is diagnosed read-only and installed through OpenClaw itself.
 
 1. Inspect effective targets with `Hive::AgentSkills::Inspector`.
 2. Ask the appropriate adapter for pure frozen operation objects, deduplicating
@@ -172,35 +153,11 @@ Hive-owned. A user-authored alias or higher-precedence shadow remains
 byte-identical and gets manual remediation. There is no global rollback for
 network/auth failures; successful independent installs remain useful.
 
-## Output and exit codes
-
-Operation state (`planned`, `skipped`, `succeeded`, `failed`) is separate from
-final health (`healthy`, `missing`, `stale`, `incompatible`, `conflicting`,
-`unavailable`).
-
 For OpenCode, a successfully configured exact pinned plugin may resolve through
 the effective native config before a persistent package cache directory
 exists. Post-verification treats that exact package-bound `configured:`
 identity as healthy instead of asking the operator to repeat an already
 successful plugin configuration.
-
-| Code | Meaning |
-|---:|---|
-| 0 | All available targeted rows are healthy/no-op; remaining rows are unavailable-only skips. |
-| 1 | An operation failed or an actionable conflict/incompatible/residual state remains. |
-| 64 | Consent declined, or planned mutation had neither TTY consent nor `--yes`. |
-| 78 | Manifest, effective config, or filter invalid. |
-
-`--json` emits `hive-setup-agents.v1`: preview/fingerprint, consent provenance,
-operation results, final health, skips, exit code, and classification. An
-unconsented unattended response is always exit 64 even when the installation
-might already be healthy: Hive deliberately does not launch native discovery
-to find out. Stdout contains exactly one JSON document; prompts/progress never
-contaminate it.
-
-Success and configuration-error documents are encoded directly. A
-`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
-it propagates.
 
 ## Extension contract
 

@@ -7,6 +7,8 @@ updated: 2026-11-20
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-run) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive run TARGET` resolves a task generation into a durable attempt,
 launches or attaches to its detached supervisor (or replays its receipt),
 streams output read-only, and returns the receipt's exit status. Inside the
@@ -16,18 +18,9 @@ Caller or daemon exit does not cancel accepted work. Public `run` and workflow
 verbs share `Hive::Attempts::CommandDispatch` for attachment failure handling;
 they differ only in intended-stage resolution and the worker argv they admit.
 
-## Usage
-
-```
-hive run <slug> [--project NAME] [--stage STAGE] [--json] [--no-rebase]
-hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
-```
-
-`TARGET` is resolved by `Hive::TaskResolver`. Bare slugs search registered projects; `--project` scopes cross-project collisions; `--stage` scopes same-slug stage collisions. Folder paths remain exact and authoritative.
-
-`--no-rebase` is a one-off override that skips the auto-rebase pre-step for this run only — useful when a long-running rebase is undesirable for an unblock or when troubleshooting the rebase machinery itself. The persistent off-switch lives in config (`rebase.enabled: false`). When `--no-rebase` is set, the JSON envelope's `rebase.reason` is `"cli_override"` (distinct from the config-driven `"disabled"`).
-
 ## Steps performed (`Commands::Run#call`)
+
+`TARGET` is resolved by `Hive::TaskResolver`. When `--no-rebase` is set, the JSON envelope's `rebase.reason` is `"cli_override"` (distinct from config-driven `"disabled"`).
 
 1. The public route resolves `TARGET`, derives stage/progress identity, and
    calls `Attempts::API#dispatch`.

@@ -7,6 +7,8 @@ updated: 2026-11-07
 tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter, receipts]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-setup) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive setup` is the normal native Linux/macOS first run. It checks
 dependencies, provisions Hive's operating skill for Claude, Codex, and Pi
 before other mutations, bootstraps authenticated Hive-owned dependencies,
@@ -17,18 +19,17 @@ preview/consent boundary covers the run: interactive setup asks once; JSON or
 non-TTY setup requires `--yes` and otherwise performs no mutation. Human and
 `hive-setup.v1` output report the effective URL and distinct service state.
 
-## Surface
-
-`hive setup [--json] [--service|--no-service] [--no-bootstrap] [--no-init] [--yes] [--install-command-receipts]`
+## Provisioning order and rollback architecture
 
 Ordinary setup creates or validates the current base schema v2 only. The default-false
 `--install-command-receipts` flag separately requests the additive command
 receipt extension. `--yes` never implies it, and enabling a namespace intake
-gate never implies it. Release-channel builds have no pinned published
-rollback package yet (issue #1550) and refuse this opt-in with CONFIG before
-any setup mutation; use `hive setup` or `hive setup --yes` without the flag for
-base-only installation or service refresh until the compatibility package is
-published.
+gate never implies it. Even with all namespace intake gates disabled, adding
+the extension changes the shared installation database so every project/service
+using it sees the added objects and unmodified pre-compatibility binaries
+refuse it (see [[commands/receipt]]). Release-channel builds have no pinned
+published rollback package yet (issue #1550) and refuse this opt-in with CONFIG
+before any setup mutation.
 
 On the dogfood channel (`HIVE_RUNTIME_CHANNEL=dogfood` with a valid
 `HIVE_RUNTIME_BUILD_SHA` and `HIVE_RUNTIME_DEPLOYMENT_ID`, as exported by
@@ -138,51 +139,7 @@ configuration remains loopback-only; setup never creates or widens a
 LAN/public bind or Tailscale Serve rule. An existing explicitly gated
 non-loopback origin is only observed and reported.
 
-## JSON
-
-`--json` emits one `hive-setup.v1` document. The `agent_skills` phase contains
-the same structured consent, operation, and health evidence as setup-agents:
-
-```json
-{
-  "schema": "hive-setup",
-  "schema_version": 1,
-  "ok": true,
-  "mode": "managed_service",
-  "url": "http://127.0.0.1:4567",
-  "service": {
-    "platform": "linux",
-    "unit_path": "/home/user/.config/systemd/user/hive-web.service",
-    "service_installed": true,
-    "service_enabled": true,
-    "service_running": true,
-    "service_manager_available": true,
-    "url": "http://127.0.0.1:4567",
-    "ready": true,
-    "readiness": "ready"
-  },
-  "warnings": [],
-  "phases": [
-    { "name": "diagnostics", "ok": true },
-    {
-      "name": "agent_skills",
-      "ok": true,
-      "classification": "success",
-      "consent": {"granted": true, "provenance": "yes_flag"},
-      "targets": [],
-      "operation_results": [],
-      "final_health": [],
-      "setup_agents_exit_code": 0
-    },
-    { "name": "web_bundle", "ok": true, "path": "/home/user/.local/share/hive/web" },
-    { "name": "daemon_service", "ok": true, "outcome": "installed", "target_path": "/home/user/.config/systemd/user/hive-daemon.service", "messages": [] },
-    { "name": "babysitter_service", "ok": true, "outcome": "installed", "target_path": "/home/user/.config/systemd/user/hive-babysitter.service", "messages": [] },
-    { "name": "enroll", "ok": true, "path": "/home/user/project" },
-    { "name": "web_service", "ok": true },
-    { "name": "web", "ok": true, "url": "http://127.0.0.1:4567" }
-  ]
-}
-```
+## Phase wrapper and config-error fallback
 
 `ok` and the process exit code use the same predicate: all recorded phases must
 be ok, and diagnostics must have no hard non-bootstrappable failures. Each
@@ -204,18 +161,6 @@ URLs stay resolvable from defaults, managed service install is blocked (not
 performed against fabricated defaults), and the remembered error fails the
 `web` phase (`ok:false`, message on the phase) so the run exits non-zero while
 still emitting the envelope.
-
-If Thor rejects argv before `Hive::Commands::Setup` runs (for example
-`hive setup extra --json`), `bin/hive` still emits the versioned
-`hive-setup.v1` `ok:false` usage payload on stdout and exits 64 before the
-human `hive:` stderr line. Invalid-byte errors use the same command-family
-schema rather than a separate pre-dispatch contract. These pre-dispatch errors
-also carry `mode`, effective `url`, migration `warnings`, and the observed
-service lifecycle so automation does not lose semantic context on failures.
-
-The final setup document is encoded directly. A serialization failure is not
-replaced with prose or a fallback JSON document; it propagates rather than
-reporting a successful setup without its contract.
 
 ## Web Bundle
 
@@ -239,27 +184,6 @@ The mutating web-install readiness window uses 40 samples at 250 ms intervals,
 so a cold packaged Rails boot can take roughly ten seconds without producing a
 false `active_not_ready` install failure. This longer window does not make
 `hive web status` block; status retains its single immediate health sample.
-
-## Examples
-
-Use `hive setup --yes --json` for an unattended managed setup, or
-`hive setup --no-bootstrap --json` for a read-only diagnostic pass.
-
-After a compatibility package is published and pinned by the build (or, on
-dogfood, while a previous receipt-aware deployment is retained),
-`hive setup --yes --install-command-receipts` explicitly changes the shared
-installation database. Even with all namespace intake gates disabled, every
-project/service using that database sees the added objects, and unmodified
-pre-compatibility binaries refuse it. Omitting the flag later retains both the
-extension and that compatibility consequence. See [[commands/receipt]] before
-enabling any project intake gate.
-
-## Output exceptions and exit codes
-
-`hive-setup.v1` records phase failures inside one document; pre-dispatch usage
-errors retain that schema. Success exits `0`, incomplete or failed setup exits
-`1`, invalid arguments or missing non-interactive consent exit `64`, and an
-invalid global/project configuration exits `78`.
 
 ## Backlinks
 

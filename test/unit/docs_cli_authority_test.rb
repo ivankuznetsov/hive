@@ -2372,6 +2372,33 @@ class DocsCliAuthorityTest < Minitest::Test
     assert_includes watch.output, "--json-lines"
     assert_includes watch.output, "hive-watch-event.v1"
     assert_match(/rejects.*--json/i, watch.output)
+    assert_includes watch.exits_and_retry, "`0`"
+    assert_includes watch.exits_and_retry, "`69`"
+    assert_includes watch.exits_and_retry, "`130`"
+    assert_includes watch.exits_and_retry, "`143`"
+
+    web_install = by_path.fetch("web install")
+    assert_includes web_install.options, "--no-bootstrap"
+    assert_includes web_install.exits_and_retry, "`1`"
+    assert_includes web_install.output, "no prose or fallback JSON document"
+
+    web_capture_server = by_path.fetch("web capture-server")
+    assert_includes web_capture_server.options, "--port"
+
+    uninstall = by_path.fetch("uninstall")
+    assert_match(/--purge.*preserving state/i, uninstall.effects_and_approvals)
+    assert_includes uninstall.effects_and_approvals, "--force-purge-state"
+
+    wiki_compile = by_path.fetch("wiki compile-log")
+    assert_match(/`64`.*--check.*stale/i, wiki_compile.exits_and_retry)
+
+    plan_review_approve = by_path.fetch("plan-review TARGET approve-finding")
+    assert_match(/`75`.*stale observation/i, plan_review_approve.exits_and_retry)
+
+    patrol = by_path.fetch("patrol")
+    assert_match(/discovery-only/i, patrol.effects_and_approvals)
+    refactor_patrol = by_path.fetch("refactor-patrol")
+    assert_match(/discovery-only/i, refactor_patrol.effects_and_approvals)
 
     tui = by_path.fetch("tui")
     assert_match(/rejects.*--json/i, tui.output)
@@ -2514,7 +2541,206 @@ class DocsCliAuthorityTest < Minitest::Test
     end
   end
 
+  # U3 Scenario 2: Transferred former Wiki semantic contracts scoped strictly to owning records + negative mutations
+  def test_transferred_wiki_semantic_contracts_and_negative_mutations
+    assert_empty semantic_contract_violations(docs_cli_text)
+
+    mutated_web = mutate_leaf(docs_cli_text, "web status") do |section|
+      section.gsub("hive-web-status.v1", "hive-web-status.v9")
+    end
+    refute_empty semantic_contract_violations(mutated_web).grep(/web status.*hive-web-status\.v1/)
+
+    mutated_version = mutate_leaf(docs_cli_text, "version") do |section|
+      section.sub("`64`", "`99`")
+    end
+    refute_empty semantic_contract_violations(mutated_version).grep(/version.*64/)
+
+    mutated_act = mutate_leaf(docs_cli_text, "act") do |section|
+      section.sub("no fallback JSON document is emitted", "a fallback JSON document is emitted")
+    end
+    refute_empty semantic_contract_violations(mutated_act).grep(/act.*fallback/)
+
+    mutated_patrol = mutate_leaf(docs_cli_text, "refactor-patrol") do |section|
+      section.sub("default to 100 records", "default to 25 records")
+    end
+    refute_empty semantic_contract_violations(mutated_patrol).grep(/refactor-patrol.*100 records/)
+
+    mutated_daemon = mutate_leaf(docs_cli_text, "daemon status") do |section|
+      section.sub("`1` daemon is not running", "`2` daemon is not running")
+    end
+    refute_empty semantic_contract_violations(mutated_daemon).grep(/daemon status.*1/)
+  end
+
+  # U3 Scenario 1 & 3: Direct consumers defer public semantics to docs/cli.md and resolve relative links/anchors
+  def test_direct_consumers_defer_authority_to_docs_cli_and_resolve_links
+    docs_anchors = heading_anchors(docs_cli_text)
+    live_wiki_command_pages = Dir.glob(File.join(ROOT, "wiki/commands/*.md")).sort.reject do |path|
+      File.basename(path) == "migrate.md"
+    end.map { |path| path.delete_prefix("#{ROOT}/") }
+
+    consumers = %w[
+      README.md
+      CONTRIBUTING.md
+      wiki/cli.md
+      wiki/commands.md
+      wiki/modules/worktree.md
+      wiki/modules/plan_review.md
+    ] + live_wiki_command_pages
+
+    consumers.each do |relative_path|
+      errors = direct_consumer_link_errors(relative_path, File.read(File.join(ROOT, relative_path)), docs_anchors)
+      assert_empty errors, errors.join("\n")
+    end
+
+    # Live per-command Wiki pages and module command targets defer public CLI contract headings to docs/cli.md
+    (live_wiki_command_pages + %w[wiki/modules/worktree.md wiki/modules/plan_review.md]).each do |relative_path|
+      headings = File.read(File.join(ROOT, relative_path)).lines.select { |line| line.start_with?("## ") }.map(&:strip)
+      forbidden = headings.select do |heading|
+        heading.match?(/\A## (?:Usage|Options|Exit|Output|JSON|Schema|Synopsis|Subcommands|Examples|Errors|Invocation|Surface\z|Serialization|Termination|Commands\z)/i)
+      end
+      assert_empty forbidden, "#{relative_path} still carries duplicated public CLI contract heading(s): #{forbidden.join(", ")}"
+    end
+
+    # Negative: removing link from shared stage_action or module worktree page identifies that exact path
+    %w[wiki/commands/stage_action.md wiki/modules/worktree.md].each do |path|
+      stripped = File.read(File.join(ROOT, path)).gsub(/\[[^\]]*docs\/cli\.md[^\]]*\]\([^)]+\)/, "removed")
+      errors = direct_consumer_link_errors(path, stripped, docs_anchors)
+      assert errors.any? { |msg| msg.include?(path) }, "expected missing authority link failure naming #{path}"
+    end
+
+    # Historical migrate page identifies removal and links to migration guide
+    migrate = File.read(File.join(ROOT, "wiki/commands/migrate.md"))
+    assert_match(/`hive migrate` has been removed/, migrate)
+    assert_includes migrate, "../../docs/guides/current-format-migration.md"
+    assert File.exist?(File.expand_path("../../docs/guides/current-format-migration.md", File.join(ROOT, "wiki/commands")))
+
+    # AE3 stale claims removed from CONTRIBUTING, README, and wiki/commands.md
+    contributing = File.read(File.join(ROOT, "CONTRIBUTING.md"))
+    refute_match(/No daemon/i, contributing)
+    refute_match(/No web UI/i, contributing)
+    refute_match(/Both `hive status` and `hive run` accept `--json`/, contributing)
+
+    readme = File.read(File.join(ROOT, "README.md"))
+    refute_match(/`hive new` is the capture exception/i, readme)
+
+    wiki_commands = File.read(File.join(ROOT, "wiki/commands.md"))
+    refute_match(/Each linked command or module page is the sole authority/i, wiki_commands)
+  end
+
   private
+
+  def semantic_contract_violations(document_text)
+    parsed = DocsCliAuthority::CatalogParser.new.parse(document_text)
+    by_path = parsed.leaves.to_h { |leaf| [ leaf.path, leaf ] }
+    errors = []
+
+    # 1. Web status & install schema bindings
+    web_status = by_path["web status"]
+    errors << "web status must bind hive-web-status.v1" unless web_status&.output&.include?("hive-web-status.v1")
+    web_install = by_path["web install"]
+    errors << "web install must bind hive-web-install.v1" unless web_install&.output&.include?("hive-web-install.v1")
+
+    # 2. Daemon 8 v1 schemas and full subcommand exit matrix
+    {
+      "daemon status" => "hive-daemon-status.v1",
+      "daemon quiesce" => "hive-daemon-quiesce.v1",
+      "daemon resume" => "hive-daemon-resume.v1",
+      "daemon stop" => "hive-daemon-stop.v1",
+      "daemon reload" => "hive-daemon-reload.v1",
+      "daemon install" => "hive-daemon-install.v1",
+      "daemon enable" => "hive-daemon-enroll.v1",
+      "daemon disable" => "hive-daemon-enroll.v1",
+      "daemon queue" => "hive-daemon-queue.v1",
+      "daemon queue list" => "hive-daemon-queue.v1",
+      "daemon queue show" => "hive-daemon-queue.v1",
+      "daemon queue prune" => "hive-daemon-queue.v1"
+    }.each do |path, schema|
+      leaf = by_path[path]
+      errors << "#{path} must bind #{schema}" unless leaf&.output&.include?(schema)
+    end
+
+    {
+      "daemon" => %w[64],
+      "daemon start" => %w[0 75],
+      "daemon stop" => %w[0],
+      "daemon status" => %w[0 1],
+      "daemon quiesce" => %w[0 70 75 78],
+      "daemon resume" => %w[0 70 75 78],
+      "daemon reload" => %w[0 1],
+      "daemon tail" => %w[0 1],
+      "daemon install" => %w[0 64 70],
+      "daemon enable" => %w[0 64 70 78],
+      "daemon disable" => %w[0 64 70 78],
+      "daemon clear-hold" => %w[0 64 75],
+      "daemon queue list" => %w[0 64 70],
+      "daemon queue prune" => %w[0 64 70],
+      "daemon queue show" => %w[0 1 64 70]
+    }.each do |path, codes|
+      exits = by_path[path]&.exits_and_retry.to_s
+      codes.each do |code|
+        unless exits.match?(/`#{code}`/)
+          errors << "#{path} missing pinned exit code #{code}"
+        end
+      end
+    end
+
+    # 3. Version exit table & v1 schema
+    version = by_path["version"]
+    errors << "version must bind hive-version.v1" unless version&.output&.include?("hive-version.v1")
+    [
+      [ /`0`.*version text or the v1 JSON document emitted/i, "version exit 0 contract" ],
+      [ /`1`.*JSON serialization failed before a document could be emitted/i, "version exit 1 contract" ],
+      [ /`64`.*malformed/i, "version exit 64 contract" ]
+    ].each do |pattern, label|
+      errors << "missing #{label}" unless version&.exits_and_retry&.match?(pattern)
+    end
+
+    # 4. Metrics, status, and act asymmetric serialization policies
+    %w[metrics metrics\ rollback-rate].each do |path|
+      out = by_path[path]&.output.to_s
+      errors << "#{path} must document omitting error_class" unless out.include?("omit `error_class`")
+      errors << "#{path} must document suppressed serialization failure" unless out.include?("suppresses that serialization failure")
+      errors << "#{path} must preserve original typed command error" unless out.include?("original typed command error")
+    end
+
+    status_out = by_path["status"]&.output.to_s
+    errors << "status must document suppressed JSON::GeneratorError" unless status_out.include?("suppresses that serialization failure")
+
+    act_out = by_path["act"]&.output.to_s
+    errors << "act must document raising generator exception" unless act_out.include?("generator exception is raised rather than suppressed")
+    errors << "act must document no fallback JSON emitted" unless act_out.include?("no fallback JSON document is emitted")
+
+    # 5. Refactor-patrol bounded immutable pagination
+    patrol_body = by_path["refactor-patrol"]&.raw_body.to_s
+    errors << "refactor-patrol must document 100 records default" unless patrol_body.include?("default to 100 records")
+    errors << "refactor-patrol must document immutable intake-sequence high-water cursor" unless patrol_body.include?("cursor freezes the intake-sequence high-water mark")
+    errors << "refactor-patrol must document hive-refactor-patrol-jobs.v2" unless patrol_body.include?("hive-refactor-patrol-jobs.v2")
+    errors << "refactor-patrol must document --full unbounded history" unless patrol_body.include?("--full")
+
+    errors
+  end
+
+  def heading_anchors(markdown)
+    markdown.scan(/^#+ (.+)$/).flatten.map do |heading|
+      heading.downcase.gsub(/[`.,()]/, "").gsub(/[^a-z0-9 _-]/, "").strip.gsub(/\s+/, "-")
+    end
+  end
+
+  def direct_consumer_link_errors(relative_path, content, docs_anchors)
+    links = content.scan(/\[[^\]]+\]\(([^)]*docs\/cli\.md(?:#[^)]+)?)\)/).flatten.uniq
+    return [ "#{relative_path}: missing relative authority link to docs/cli.md" ] if links.empty?
+
+    page_abs = File.join(ROOT, relative_path)
+    links.filter_map do |link|
+      rel, anchor = link.split("#", 2)
+      resolved = File.expand_path(rel, File.dirname(page_abs))
+      if resolved != File.expand_path(DOCS_CLI_PATH)
+        "#{relative_path}: link #{link.inspect} resolves to #{resolved}, not #{DOCS_CLI_PATH}"
+      elsif anchor && !docs_anchors.include?(anchor)
+        "#{relative_path}: broken docs/cli.md anchor #{link.inspect}"
+      end
+    end
+  end
 
   def extract_leaf(document, path)
     heading = "### `hive #{path}`\n"

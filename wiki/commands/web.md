@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-11-07
+updated: 2026-11-28
 tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
@@ -312,6 +312,71 @@ when an owner gate authorizes a non-loopback bind, the CLI warns that
 origin also prints the TLS/reverse-proxy warning.
 Production accepts arbitrary Host values in both modes so the controller-level
 login gate can run; Host never grants the no-auth bypass unless it is loopback.
+
+### GitHub transport error handling and diagnostics
+
+Both `Hive::Web::GithubAuth` (device authorization, grant polling, and user
+lookup) and `GithubApi` (repository listing and task pull-request publication
+lookup) enforce one shared transport policy owned beside
+`Hive::Web::GithubAuth::NETWORK_ERRORS` (`GithubApi::NETWORK_ERRORS` aliases
+the same constant). The request-boundary exception family uses transport
+superclasses—`Net::OpenTimeout`, `Net::ReadTimeout`, `Net::WriteTimeout`,
+`Timeout::Error`, `SocketError`, `OpenSSL::SSL::SSLError`, `SystemCallError`
+(covering every connection-level `Errno::*` without enumerating subclasses),
+and `IOError` (covering premature `EOFError`)—while individual subclasses are
+mapped only inside `Hive::Web::GithubAuth.transport_reason`.
+
+Transport normalization stays strictly at the narrow request boundaries
+(`GithubAuth#request` and `GithubApi#execute_transport`). Malformed JSON,
+non-success HTTP status codes, rate limits (403/429), authentication failures
+(401), oversized response bodies, GraphQL errors, missing pull requests,
+payload/identity validation failures, unexpected response shapes, and
+programming errors (such as `NoMethodError` or a post-transport
+`SystemCallError`) remain outside transport normalization and emit no
+transport warning.
+
+Every normalized transport failure logs one untagged JSON warning line and
+raises its caller's typed wrapper (`Hive::Error` for `GithubAuth`,
+`GithubApi::ReadError` with `reason: "network_failed"` for `GithubApi`) with
+`cause: nil` and the exact guidance:
+`Could not reach GitHub. Check this host's network, DNS, and TLS configuration, then try again.`
+In `GithubApi`, transport-raised `Net::OpenTimeout`, `Net::ReadTimeout`,
+`Net::WriteTimeout`, and bare `Timeout::Error` are classified as
+`network_failed` (reclassified from `deadline_exceeded`) with that shared
+guidance. Expiry of `GithubApi`'s own total request timer is signaled
+exclusively through its private `TotalDeadlineExceeded` class, retaining
+`reason: "deadline_exceeded"`, message
+`GitHub API request exceeded its total deadline`, and warning reason
+`total_deadline`.
+
+Operators see that shared guidance on the 422 sign-in error page, in the inline
+error banner on the Projects/Repos page (`ReposController`), and in the task
+Publication diagnostics list. A failed publication refresh caches only the
+typed diagnostic (`source: "publication_cache"`, `reason: "network_failed"`,
+and wrapper class `GithubApi::ReadError`) in `last_error`; `_publication.html.erb`
+renders the shared guidance whenever `source == "publication_cache"` and
+`reason == "network_failed"`, so both fresh failed refreshes and later
+cache-only GETs display the same guidance without storing raw exception text or
+re-emitting a warning, while other reasons keep their humanized labels.
+
+`Hive::Web::GithubAuth.new` requires an explicit `logger:`. Rails callers
+(`SessionsController`, `ApplicationController`, and `GithubApi`'s default
+logger) pass `GithubTransportLogger.build`, which duplicates `Rails.logger`
+with a fresh `ActiveSupport::Logger::SimpleFormatter` so warnings write one
+parseable JSON line to the configured log destination without mutating the
+active request logger's formatter or tag stack; non-request
+`Hive::CommandMaintenanceAuthority.github` owner checks pass a null logger.
+Each warning emitted by `Hive::Web::GithubAuth.warn_transport` contains only
+four allowlisted keys—`event` (`github_transport_error`), literal `operation`
+(`github_device_authorization`, `github_device_grant_poll`,
+`github_user_lookup`, `github_api_repositories`, or
+`github_api_pull_request`), classifier-owned safe `reason` (`tls_failure`,
+`dns_failure`, `open_timeout`, `read_timeout`, `write_timeout`,
+`connection_timeout`, `connection_refused`, `connection_reset`,
+`network_unreachable`, `host_unreachable`, `premature_eof`,
+`system_call_failure`, `io_failure`, or `total_deadline`), and
+`error_class`—never raw exception messages, backtraces, URIs, query strings,
+credentials, or request tags.
 
 ## Surfaces
 

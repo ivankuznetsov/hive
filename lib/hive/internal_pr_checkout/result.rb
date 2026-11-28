@@ -163,6 +163,16 @@ module Hive
         data
       end
 
+      def to_text
+        parts = [ "hive: internal-pr reconciliation status=#{status} reason=#{reason}" ]
+        parts << "pr=##{pr_number}" if pr_number
+        parts << "gen=#{generation}" if generation
+        parts << "head=#{head_oid[0, 12]}" if head_oid
+        parts << "prev=#{previous_head_oid[0, 12]}" if previous_head_oid
+        line = parts.join(" ")
+        guidance.to_s.empty? ? line : "#{line} — #{guidance}"
+      end
+
       private
 
       def deep_freeze_hash(value)

@@ -12801,6 +12801,149 @@ end
                     "shutdown snapshot unavailable"
   end
 
+  def test_daemon_paces_deferred_explicit_reopen_so_second_task_admits_and_handles_superseded
+    require "hive/internal_pr_checkout"
+
+    with_tmp_dir do |dir|
+      root = File.join(dir, "repo")
+      pr_folder = File.join(root, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      other_folder = File.join(root, ".hive-state", "stages", "4-execute", "other-task")
+      FileUtils.mkdir_p(pr_folder)
+      FileUtils.mkdir_p(other_folder)
+      File.write(File.join(pr_folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{"a" * 40}
+        ---
+        PR 42
+      MD
+      File.write(File.join(pr_folder, "task.md"), "PR 42\n")
+      File.write(File.join(other_folder, "task.md"), "Other\n")
+
+      removed_ids = []
+      released_ids = []
+      repo = Object.new
+      repo.define_singleton_method(:dispatch) { |req, dispatcher:, **opts| dispatcher.dispatch_request(req, **opts) }
+      repo.define_singleton_method(:release_claim) { |id, **| released_ids << id }
+      repo.define_singleton_method(:remove) { |id, **| removed_ids << id }
+      repo.define_singleton_method(:pending) { |**| [] }
+      repo.define_singleton_method(:claimed) { |**| [] }
+      repo.define_singleton_method(:valid_argv?) { |_argv| true }
+      repo.define_singleton_method(:expired?) { |_req, **| false }
+      repo.define_singleton_method(:generate_request_id) { "gen-req-id" }
+      pr_req = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
+        request_id: "req-pr-hung", project: "p1", slug: "adhoc-review-pr-42",
+        argv: %w[hive review adhoc-review-pr-42], requestor: "bot",
+        chat_id: nil, update_id: nil, trigger: "reopen",
+        task_generation: nil, inherited_outputs: [],
+        schema_version: 5, state: "queued", revision: 0, created_at: T0
+      )
+      other_req = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
+        request_id: "req-other-task", project: "p1", slug: "other-task",
+        argv: %w[hive run other-task], requestor: "bot",
+        chat_id: nil, update_id: nil, trigger: "run",
+        task_generation: nil, inherited_outputs: [],
+        schema_version: 5, state: "queued", revision: 0, created_at: T0
+      )
+      stale_req = Hive::RuntimeControlPlane::DispatchRepository::Request.new(
+        request_id: "req-stale-pr", project: "p1", slug: "adhoc-review-pr-42",
+        argv: %w[hive review adhoc-review-pr-42], requestor: "bot",
+        chat_id: nil, update_id: nil, trigger: "reopen",
+        task_generation: nil, inherited_outputs: [],
+        schema_version: 5, state: "queued", revision: 0, created_at: T0
+      )
+
+      timeout_rec = Hive::InternalPrCheckout::Result.new(
+        status: "blocked", reason: "provider_unavailable", retryable: true,
+        task_slug: "adhoc-review-pr-42", guidance: "reopen network deadline expired"
+      )
+      dispatched = []
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |req, **opts|
+        dispatched << [ req.request_id, opts ]
+        case req.request_id
+        when "req-pr-hung"
+          Hive::Attempts::DispatchResult.new(
+            status: :deferred, attempt: nil, receipt: nil,
+            attach_descriptor: nil, reason: "provider_unavailable",
+            reconciliation: timeout_rec
+          )
+        when "req-stale-pr"
+          Hive::Attempts::DispatchResult.new(
+            status: :superseded, attempt: nil, receipt: nil,
+            attach_descriptor: nil, reason: "stale_generation"
+          )
+        else
+          attempt = Struct.new(:attempt_id, :task_generation, :state).new("att-other", "gen-other", "launching")
+          Hive::Attempts::DispatchResult.new(
+            status: :accepted, attempt: attempt, receipt: nil,
+            attach_descriptor: nil, reason: nil
+          )
+        end
+      end
+
+      dispatcher, _sup, _ctrl, logger = make_dispatcher(
+        rows: [], dispatch_repository: repo, attempt_dispatcher: attempt_dispatcher
+      )
+      pr_task = Struct.new(:folder, :project_root, :slug, :stage_name, :workflow).new(
+        pr_folder, root, "adhoc-review-pr-42", "review", "coding"
+      )
+      other_task = Struct.new(:folder, :project_root, :slug, :stage_name, :workflow).new(
+        other_folder, root, "other-task", "execute", "coding"
+      )
+      resolver_factory = lambda do |slug, **_kw|
+        Struct.new(:task) { def resolve = task }.new(slug == "other-task" ? other_task : pr_task)
+      end
+
+      with_replaced_singleton_method(Hive::TaskResolver, :new, resolver_factory) do
+        # 1. Hung PR reopen receives a bounded monotonic deadline, defers, and records retry backoff.
+        res_pr = dispatcher.send(:dispatch_request!, pr_req, now: T0)
+        assert_equal :deferred, res_pr.status
+        assert_kind_of Float, dispatched.first.last[:reconcile_deadline]
+
+        # 2. Second task admits immediately in the same tick without stalling.
+        res_other = dispatcher.send(:dispatch_request!, other_req, now: T0)
+        assert_equal :accepted, res_other.status
+
+        # 3. On the next tick before backoff expires, hung PR is skipped without invoking attempt_dispatcher again.
+        before_count = dispatched.length
+        dispatcher.send(:process_dispatch_request_iteration, pr_req, now: T0 + 1, rows: [], row_index: {}, project_lookup: ->(_n) { { "name" => "p1", "path" => root } })
+        assert_equal before_count, dispatched.length, "deferred internal PR reopen must be paced across ticks"
+
+        # 4. Stale superseded request is removed cleanly and logs dispatch_request_rejected.
+        res_stale = dispatcher.send(:dispatch_request!, stale_req, now: T0)
+        assert_equal :superseded, res_stale.status
+        assert events_include?(logger, :dispatch_request_rejected)
+      end
+
+      # 5. Automatic continuation (`dispatch_durable_command`) uses requestor: "daemon" (local_verify, zero provider calls).
+      auto_calls = []
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |req, **opts|
+        auto_calls << [ req.requestor, opts ]
+        Hive::Attempts::DispatchResult.new(
+          status: :deferred, attempt: nil, receipt: nil,
+          attach_descriptor: nil, reason: "remote_observation_required",
+          reconciliation: Hive::InternalPrCheckout::Result.new(
+            status: "blocked", reason: "remote_observation_required", retryable: true,
+            task_slug: "adhoc-review-pr-42", guidance: "needs explicit reopen"
+          )
+        )
+      end
+      2.times do |tick|
+        auto_res = dispatcher.send(
+          :dispatch_durable_command, "hive review adhoc-review-pr-42",
+          project: "p1", slug: "adhoc-review-pr-42", stage: "6-review",
+          now: T0 + tick, trigger: "advance", request_id: "auto-#{tick}"
+        )
+        assert_equal :deferred, auto_res.status
+      end
+      assert_equal [ "daemon", "daemon" ], auto_calls.map(&:first)
+      assert auto_calls.all? { |_, opts| !opts.key?(:reconcile_deadline) }
+    end
+  end
+
   private
 
   def review_row_with_pull_request_state

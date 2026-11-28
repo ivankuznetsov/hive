@@ -286,14 +286,16 @@ module Hive
       end
 
       def run_at(folder, observation_guard:, no_rebase: false)
-        Hive::Commands::Run.new(
+        cmd = Hive::Commands::Run.new(
           folder,
           project: @project_filter,
           json: false,
           quiet: @json || @quiet,
           no_rebase: no_rebase,
           observation_guard: observation_guard
-        ).call
+        )
+        cmd.call
+        @internal_pr_reconciliation = cmd.internal_pr_reconciliation
       end
 
       def publish_task_completed(task)
@@ -349,6 +351,7 @@ module Hive
           "next_action" => action.payload
         }
         payload["reason"] = reason if reason
+        payload["reconciliation"] = @internal_pr_reconciliation.to_h if @internal_pr_reconciliation
         payload
       end
 

@@ -25,7 +25,7 @@ module Hive
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc,
                    proposal_admission: nil, reconcile_mode: nil,
-                   reconcile_deadline: nil)
+                   reconcile_deadline: nil, stdout: nil, stderr: nil)
         kwargs = {
           task: task, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider,
@@ -33,6 +33,8 @@ module Hive
         }
         kwargs[:reconcile_mode] = reconcile_mode unless reconcile_mode.nil?
         kwargs[:reconcile_deadline] = reconcile_deadline unless reconcile_deadline.nil?
+        kwargs[:stdout] = stdout unless stdout.nil?
+        kwargs[:stderr] = stderr unless stderr.nil?
         foreground.dispatch(**kwargs)
       end
 

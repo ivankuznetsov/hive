@@ -411,6 +411,36 @@ class ReviewBaseMergeAdoptionTest < Minitest::Test
     end
   end
 
+  def test_internal_pr_review_task_is_declined_before_any_effects
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{"a" * 40}
+        ---
+        PR 42
+      MD
+      task = Struct.new(:folder, :project_root, :slug, :stage_name, :workflow, :project_name).new(
+        folder, dir, "adhoc-review-pr-42", "review", "coding", "demo"
+      )
+      marker = Hive::Markers::State.new(
+        name: :review_ci_stale,
+        attrs: { "reason" => "base_conflict" },
+        raw: ""
+      )
+      gate = Object.new
+      gate.define_singleton_method(:read) { |*| flunk "must not invoke git gate for internal PR review" }
+
+      result = Hive::ReviewBaseMergeAdoption.new(task: task, gate: gate).adopt!(marker: marker)
+      assert_nil result
+      refute File.exist?(File.join(folder, "reviews"))
+    end
+  end
+
   private
 
   def adopter(task, gate: Hive::AgentGitGate, activity: :journal)

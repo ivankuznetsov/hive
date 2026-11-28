@@ -3397,6 +3397,126 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  public
+
+  def test_internal_pr_recovery_reconciles_under_lease_for_current_reopened_busy_and_blocked
+    require "hive/internal_pr_checkout"
+
+    Dir.mktmpdir("hive-recovery-internal-pr") do |dir|
+      project_root = File.join(dir, "project")
+      folder = File.join(project_root, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(folder, id: 42, slug: "adhoc-review-pr-42", display_name: nil, workflow: "coding")
+      prepare_test_task_lease_repository(folder, state_home: File.join(dir, "lease-runtime"))
+      oid_a = "a" * 40
+      oid_b = "b" * 40
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{oid_a}
+        ---
+        PR 42
+      MD
+      state_file = File.join(folder, "task.md")
+      attrs = { "phase" => "ci", "reason" => "agent_failed", "marker_id" => "m-pr-1" }
+      write_error_marker = lambda do
+        File.write(state_file, "# Review\n\n#{Hive::Markers.build_marker('REVIEW_ERROR', attrs)}\n")
+        File.utime(NOW - 3600, NOW - 3600, state_file)
+      end
+      write_error_marker.call
+
+      task = Struct.new(
+        :id, :slug, :folder, :state_file, :stage_index, :stage_name, :project_root, :workflow,
+        keyword_init: true
+      ).new(
+        id: 42, slug: "adhoc-review-pr-42", folder: folder, state_file: state_file,
+        stage_index: 6, stage_name: "review", project_root: project_root, workflow: "coding"
+      )
+      row = FakeRow.new(
+        project: "hive", slug: task.slug, folder: folder, state_file: state_file,
+        stage: "6-review", workflow: "coding", marker: "review_error",
+        marker_attrs: attrs, state_file_mtime: NOW - 3600, live_task_lock: false,
+        attempt_id: nil, task_generation: nil,
+        suggested_command: "hive review adhoc-review-pr-42 --project hive --json"
+      )
+      Q.register_project(dir, "hive")
+
+      build_coordinator = lambda do |reconciler:|
+        Hive::Daemon::RecoveryCoordinator.new(
+          state_home: dir,
+          dispatch_repository: Q.repository(dir),
+          task_resolver: ->(**) { task },
+          safety: ->(_r) { [ true, "safe" ] },
+          internal_pr_reconciler: reconciler,
+          generation_resolver: lambda do |resolved_task, project:, intended_stage:, state_file_content:|
+            progress = Digest::SHA256.hexdigest([ resolved_task.state_file, state_file_content ].join("\0"))
+            FakeGeneration.new(
+              progress_token: progress,
+              task_generation: Digest::SHA256.hexdigest([ project, intended_stage, progress ].join("\0"))
+            )
+          end
+        )
+      end
+
+      # 1. Busy (manual_steering) and blocked (pointer_unowned) never clear the REVIEW_ERROR marker.
+      [
+        Hive::InternalPrCheckout::Result.new(status: "busy", reason: "manual_steering", task_slug: task.slug, guidance: "steering active"),
+        Hive::InternalPrCheckout::Result.new(status: "blocked", reason: "pointer_unowned", retryable: false, task_slug: task.slug, guidance: "unowned")
+      ].each_with_index do |rec, idx|
+        write_error_marker.call
+        reconciler_calls = []
+        coord = build_coordinator.call(reconciler: lambda { |**kw|
+          assert kw.fetch(:lock_held), "recovery reconciler must run under task lease"
+          assert_equal :explicit_reopen, kw.fetch(:mode)
+          reconciler_calls << kw
+          rec
+        })
+        admitted = coord.request(row: row, requestor: "action", request_id: "rec-refuse-#{idx}", now: NOW)
+        req = Q.repository(dir).fetch(admitted.request_id, state_home: dir)
+        resumed = coord.resume(request: req, row: row, now: NOW + 1)
+        assert_equal "blocked", resumed.status
+        assert_equal rec.reason, resumed.reason
+        assert_equal :review_error, Hive::Markers.current(state_file).name, "must not clear marker on #{rec.reason}"
+        assert_equal 1, reconciler_calls.length
+        Q.repository(dir).remove(admitted.request_id, state_home: dir)
+      end
+
+      # 2. Repush during recovery (`reopened`) supersedes old recovery with generation_conflict and never manually clears.
+      write_error_marker.call
+      reopened_rec = Hive::InternalPrCheckout::Result.new(
+        status: "reopened", reason: "head_changed", task_slug: task.slug,
+        pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 2, head_oid: oid_b, previous_head_oid: oid_a, guidance: "reopened to B"
+      )
+      coord_reopen = build_coordinator.call(reconciler: ->(**) { reopened_rec })
+      admitted_reopen = coord_reopen.request(row: row, requestor: "action", request_id: "rec-reopen", now: NOW)
+      req_reopen = Q.repository(dir).fetch(admitted_reopen.request_id, state_home: dir)
+      resumed_reopen = coord_reopen.resume(request: req_reopen, row: row, now: NOW + 1)
+      assert_equal "blocked", resumed_reopen.status
+      assert_equal "generation_conflict", resumed_reopen.reason
+      assert_includes resumed_reopen.remediation, "old recovery superseded by reopened head"
+      assert_equal :review_error, Hive::Markers.current(state_file).name
+      Q.repository(dir).remove(admitted_reopen.request_id, state_home: dir)
+
+      # 3. Same-head (`current`) clears the compared REVIEW_ERROR marker and transitions to cleared for authorized retry.
+      write_error_marker.call
+      current_rec = Hive::InternalPrCheckout::Result.new(
+        status: "current", reason: "head_unchanged", task_slug: task.slug,
+        pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 1, head_oid: oid_a, guidance: "unchanged"
+      )
+      coord_same = build_coordinator.call(reconciler: ->(**) { current_rec })
+      admitted_same = coord_same.request(row: row, requestor: "action", request_id: "rec-same-head", now: NOW)
+      req_same = Q.repository(dir).fetch(admitted_same.request_id, state_home: dir)
+      resumed_same = coord_same.resume(request: req_same, row: row, now: NOW + 1)
+      assert_equal "queued", resumed_same.status, resumed_same.to_h.inspect
+      assert_equal "cleared", resumed_same.phase
+      assert_equal :none, Hive::Markers.current(state_file).name
+    end
+  end
+
   def patrol_fix_decision_receipt(slug)
     {
       "schema" => "hive-patrol-fix-receipt", "schema_version" => 1,

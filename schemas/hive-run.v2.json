@@ -120,6 +120,10 @@
           "type": "array",
           "items": { "$ref": "#/$defs/HumanOutcome" }
         },
+        "reconciliation": {
+          "description": "Bounded internal PR checkout reconciliation observation for this invocation when applicable.",
+          "$ref": "#/$defs/InternalPrReconciliation"
+        },
         "rebase": {
           "description": "Outcome of the auto-rebase pre-step (Hive::Rebase). Always present. `attempted` is true only when the rebase machinery ran past the disabled/no-worktree guards. `succeeded` is true on clean rebase (or no-op when commits_behind==0). `reason` is null on success and a string (snake_case) naming the skip-or-failure cause otherwise. `post_rebase_warnings` carries non-fatal warnings produced after a successful rebase (e.g., `worktree.yml` execute_base_head write failure); always an array, empty when none.",
           "type": "object",
@@ -375,6 +379,101 @@
           "type": "string"
         },
         "safe_correction": {
+          "type": "string"
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/InternalPrReconciliation"
+        }
+      }
+    },
+    "InternalPrReconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reason",
+        "retryable",
+        "guidance"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_applicable",
+            "current",
+            "reopened",
+            "busy",
+            "blocked"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "not_internal_pr_review",
+            "head_unchanged",
+            "pending_recovered_current",
+            "head_changed",
+            "pending_recovered_reopened",
+            "task_locked",
+            "manual_steering",
+            "pointer_missing",
+            "pointer_malformed",
+            "pointer_unowned",
+            "pr_metadata_invalid",
+            "sidecar_inconsistent",
+            "checkout_dirty",
+            "checkout_detached",
+            "checkout_diverged",
+            "candidate_unproven",
+            "pending_invalid",
+            "git_residue_unverifiable",
+            "custody_limit_exceeded",
+            "custody_mismatch",
+            "git_config_unsafe",
+            "remote_identity_invalid",
+            "remote_changed_before_linearization",
+            "provider_unavailable",
+            "remote_observation_required",
+            "transition_interrupted"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "guidance": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "task_slug": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "pr_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pr_url": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_oid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "previous_head_oid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "candidate_oid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "transaction_id": {
           "type": "string"
         }
       }

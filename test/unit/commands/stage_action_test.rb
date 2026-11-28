@@ -407,6 +407,88 @@ class CommandsStageActionTest < Minitest::Test
     assert_empty out
   end
 
+  def test_durable_review_stage_action_merges_reconciliation_and_emits_blocked_envelope
+    require "hive/internal_pr_checkout"
+
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{"b" * 40}
+        ---
+        PR 42
+      MD
+      task = Struct.new(:folder, :project_root, :slug, :stage_name, :workflow).new(
+        folder, dir, "adhoc-review-pr-42", "review", "coding"
+      )
+      worker_doc = JSON.generate({
+        "schema" => "hive-stage-action", "schema_version" => 2, "ok" => true,
+        "verb" => "review", "phase" => "ran", "noop" => false,
+        "slug" => "adhoc-review-pr-42", "from_stage_dir" => "5-open-pr",
+        "to_stage_dir" => "6-review", "task_folder" => folder,
+        "marker_after" => "review_complete",
+        "next_action" => { "key" => "ready_to_artifacts", "label" => "Ready", "command" => nil },
+        "reconciliation" => {
+          "status" => "current", "reason" => "head_unchanged",
+          "retryable" => false, "guidance" => "worker verified locally"
+        }
+      })
+      reopened = Hive::InternalPrCheckout::Result.new(
+        status: "reopened", reason: "head_changed", task_slug: "adhoc-review-pr-42",
+        pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 2, head_oid: "b" * 40, previous_head_oid: "a" * 40, guidance: "reopened"
+      )
+      api = Object.new
+      received = nil
+      api.define_singleton_method(:dispatch) do |**kwargs|
+        received = kwargs
+        kwargs.fetch(:stdout).write("#{worker_doc}\n")
+        Hive::Attempts::ClientResult.new(
+          status: :terminal, exit_status: 0, outcome: "succeeded",
+          receipt: {}, attempt_id: "att-sa-1", stdout_bytes: worker_doc.bytesize + 1,
+          reconciliation: reopened
+        )
+      end
+      cmd = Hive::Commands::StageAction.new(
+        "review", "adhoc-review-pr-42", json: true, durable: true, attempt_entrypoint: api
+      )
+      cmd.define_singleton_method(:resolve_task) { task }
+      out, = capture_io { cmd.call }
+
+      assert_equal :explicit_reopen, received.fetch(:reconcile_mode)
+      assert_kind_of Float, received.fetch(:reconcile_deadline)
+      parsed = JSON.parse(out)
+      assert_equal "reopened", parsed.dig("reconciliation", "status")
+      assert_equal "head_changed", parsed.dig("reconciliation", "reason")
+
+      # Blocked reconciliation emits valid hive-stage-action v2 error envelope.
+      blocked = Hive::InternalPrCheckout::Result.new(
+        status: "blocked", reason: "pointer_unowned", retryable: false,
+        task_slug: "adhoc-review-pr-42", guidance: "pointer is unowned"
+      )
+      blocked_api = Object.new
+      blocked_api.define_singleton_method(:dispatch) do |**_kwargs|
+        raise Hive::Attempts::ReconciliationBlocked.new("blocked", reconciliation: blocked)
+      end
+      blocked_cmd = Hive::Commands::StageAction.new(
+        "review", "adhoc-review-pr-42", json: true, durable: true, attempt_entrypoint: blocked_api
+      )
+      blocked_cmd.define_singleton_method(:resolve_task) { task }
+      err_out, = capture_io do
+        assert_raises(Hive::Attempts::ReconciliationBlocked) { blocked_cmd.call }
+      end
+      err_doc = JSON.parse(err_out)
+      assert_equal false, err_doc.fetch("ok")
+      assert_equal "review", err_doc.fetch("verb")
+      assert_equal "blocked", err_doc.dig("reconciliation", "status")
+      assert_equal "pointer_unowned", err_doc.dig("reconciliation", "reason")
+    end
+  end
+
   private
 
   def with_command_receipts

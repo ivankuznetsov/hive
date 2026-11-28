@@ -26,7 +26,7 @@ module Hive
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc,
                    proposal_admission: nil, reconcile_mode: :explicit_reopen,
-                   reconcile_deadline: nil)
+                   reconcile_deadline: nil, stdout: nil, stderr: nil)
         store = @store ||= Repository.open_default
         dispatcher = @dispatcher ||= ConfiguredDispatcher.new(
           store: store, config_loader: @config_loader
@@ -90,7 +90,16 @@ module Hive
         end
         return result unless interactive && result.attempt
 
-        attached = (@client || Client.new(store: store)).attach(result.attempt.attempt_id)
+        client = @client || Client.new(store: store)
+        attached = if stdout || stderr
+          client.attach(
+            result.attempt.attempt_id,
+            stdout: stdout || $stdout,
+            stderr: stderr || $stderr
+          )
+        else
+          client.attach(result.attempt.attempt_id)
+        end
         result.reconciliation ? attached.with(reconciliation: result.reconciliation) : attached
       end
 

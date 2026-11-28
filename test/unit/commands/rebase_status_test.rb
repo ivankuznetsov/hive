@@ -252,4 +252,23 @@ class HiveCommandsRebaseStatusTest < Minitest::Test
     out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: git)
     assert_match(/7 commits behind/, out)
   end
+
+  def test_internal_pr_review_reports_published_review_branch
+    wt = Dir.mktmpdir("wt")
+    task = make_task(worktree: wt, review: true)
+    File.write(File.join(task.folder, "pr.md"), <<~MD)
+      ---
+      source: ad-hoc
+      pr_number: 42
+      pr_url: https://github.com/acme/repo/pull/42
+      head_oid: #{"a" * 40}
+      ---
+      Internal PR 42
+    MD
+    out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: FakeGit.new, json: true)
+    payload = JSON.parse(out)
+
+    assert_equal "published_review_branch", payload["state"]
+    assert_equal false, payload["would_rebase"]
+  end
 end

@@ -312,6 +312,10 @@ module Hive
         # remain blocked for many polls; only state changes are useful in the
         # append-only daemon log.
         @dispatch_request_log_signatures = {}
+        # `request_id => { attempts:, next_eligible_at:, reason: }` so deferred
+        # or blocked internal PR reopen requests pace cleanly across ticks
+        # instead of monopolizing subsequent daemon polls.
+        @internal_pr_reopen_backoff = {}
         # Per-tick exact provider-routing decisions keyed by the status row
         # they evaluated. The completed operational snapshot consumes these;
         # no selector is rerun for status rendering.
@@ -3714,6 +3718,9 @@ module Hive
         @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
           !current_request_ids.key?(request_id)
         end
+        @internal_pr_reopen_backoff.delete_if do |request_id, _|
+          !current_request_ids.key?(request_id)
+        end
         empty_fences = { global: nil, projects: {} }
         if pending.empty?
           return {
@@ -4148,6 +4155,17 @@ module Hive
           return gate
         end
 
+        if (backoff = @internal_pr_reopen_backoff[req.request_id.to_s]) &&
+           now < backoff.fetch(:next_eligible_at)
+          log_dispatch_request_once(
+            :dispatch_request_blocked,
+            request_id: req.request_id, project: req.project,
+            slug: req.slug, reason: backoff.fetch(:reason),
+            next_eligible_at: backoff.fetch(:next_eligible_at).iso8601
+          )
+          return
+        end
+
         dispatch_request!(req, now: now)
       end
 
@@ -4252,10 +4270,14 @@ module Hive
           return :shutdown
         end
         if durable_admission
-          result = dispatch_repository.dispatch(
-            req, dispatcher: @attempt_dispatcher, interactive: false, now: now,
+          dispatch_opts = {
+            dispatcher: @attempt_dispatcher, interactive: false, now: now,
             admission_view: @attempt_snapshot&.admission_view
-          )
+          }
+          if (reopen_deadline = internal_pr_reopen_deadline_for(req))
+            dispatch_opts[:reconcile_deadline] = reopen_deadline
+          end
+          result = dispatch_repository.dispatch(req, **dispatch_opts)
           if req.recovery&.fetch("variant", nil) == "marker" &&
               %i[accepted existing_live terminal_replay].include?(result.status) &&
               !@recovery_coordinator.manual_attempt_matches?(req, result.attempt)
@@ -4264,6 +4286,31 @@ module Hive
               reason: "attempt_identity_conflict")
           end
           log_attempt_admission(result)
+          if result.status == :superseded
+            @internal_pr_reopen_backoff.delete(req.request_id.to_s)
+            dispatch_repository.remove(
+              req.request_id, state_home: dispatch_request_state_home
+            )
+            @logger.event(
+              :dispatch_request_rejected,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: result.reason || "stale_generation"
+            )
+            return result
+          end
+          if result.status == :blocked
+            record_internal_pr_reopen_backoff(req, reason: result.reason, now: now)
+            dispatch_repository.release_claim(
+              req.request_id, state_home: dispatch_request_state_home
+            )
+            log_dispatch_request_once(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project,
+              slug: req.slug, reason: result.reason,
+              remediation: result.reconciliation&.guidance
+            )
+            return result
+          end
           if result.status == :deferred && result.reason == "capacity_saturated"
             recovery_receipt = if req.recovery.is_a?(Hash)
               @recovery_coordinator.observe_admission_result(
@@ -4284,6 +4331,9 @@ module Hive
           end
           if result.status == :deferred
             recovery_receipt = defer_recovery_after_dispatch_failure(req, now: now)
+            if result.reconciliation
+              backoff = record_internal_pr_reopen_backoff(req, reason: result.reason, now: now)
+            end
             dispatch_repository.release_claim(
               req.request_id, state_home: dispatch_request_state_home
             )
@@ -4292,7 +4342,7 @@ module Hive
               request_id: req.request_id, project: req.project,
               slug: req.slug, reason: result.reason,
               lifecycle: recovery_receipt&.status,
-              next_eligible_at: recovery_receipt&.next_eligible_at
+              next_eligible_at: recovery_receipt&.next_eligible_at || backoff&.dig(:next_eligible_at)&.iso8601
             )
             return result
           end
@@ -4340,6 +4390,7 @@ module Hive
               now: now
             )
           end
+          @internal_pr_reopen_backoff.delete(req.request_id.to_s)
           event = case result.status
           when :accepted then :dispatch_request_dispatched
           when :existing_live then :dispatch_request_attached
@@ -5247,7 +5298,7 @@ module Hive
             "action" => command, "outcome" => "admitted",
             "details" => { "attempt_id" => result.attempt.attempt_id }
           } if scoped_execution?
-        elsif result.status == :deferred
+        elsif %i[deferred blocked superseded].include?(result.status)
           @logger.event(
             :blocked,
             attempt_id: result.attempt&.attempt_id,
@@ -5276,6 +5327,33 @@ module Hive
 
       def current_dispatch_time(fallback)
         @clock ? @clock.call.utc : fallback
+      end
+
+      def internal_pr_reopen_deadline_for(req)
+        return nil unless %w[action bot cli web].include?(req.requestor.to_s)
+        return nil if req.trigger.to_s.start_with?("recovery/admission_failure", "recovery/markerless_failure")
+
+        task = Hive::TaskResolver.new(req.slug, project_filter: req.project).resolve
+        return nil unless %w[review 6-review].include?(task.stage_name.to_s)
+
+        require "hive/internal_pr_checkout"
+        return nil unless Hive::InternalPrCheckout.applicable?(task)
+
+        Hive::InternalPrCheckout.monotonic_deadline(project_root: task.project_root)
+      rescue Hive::Error, SystemCallError, IOError
+        nil
+      end
+
+      def record_internal_pr_reopen_backoff(req, reason:, now:)
+        key = req.request_id.to_s
+        previous = @internal_pr_reopen_backoff[key]
+        attempts = previous ? previous.fetch(:attempts) + 1 : 0
+        delay = Hive::Recovery::RetryPolicy.delay_sec(attempts)
+        @internal_pr_reopen_backoff[key] = {
+          attempts: attempts,
+          reason: reason.to_s,
+          next_eligible_at: now + delay
+        }
       end
 
       def log_attempt_admission(result)

@@ -1120,4 +1120,61 @@ class ReviewRemoteCiTest < Minitest::Test
       assert_equal 0, publisher.instance_variable_get(:@sleeper).call(0)
     end
   end
+
+  def test_base_conflict_on_internal_pr_guides_source_pr_resolution_and_flags_unproven_local_merge
+    require "hive/internal_pr_checkout"
+
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      File.write(File.join(task.folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/app/pull/42
+        head_oid: #{head}
+        ---
+        PR 42
+      MD
+      Hive::InternalPrCheckout.initialize_new_task!(
+        task_folder: task.folder, task_id: "42", task_slug: File.basename(task.folder),
+        project: "demo", pr_host: "github.com", pr_repository: "acme/app", pr_number: 42,
+        pr_url: "https://github.com/acme/app/pull/42", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-42", head_oid: head
+      )
+      rollup = {
+        "url" => "https://github.com/acme/app/pull/42",
+        "baseRefName" => "main",
+        "mergeable" => "CONFLICTING",
+        "mergeStateStatus" => "DIRTY"
+      }
+
+      runner = Hive::Stages::Review::RemoteCi::Runner.new(
+        task: task, cfg: cfg, ctx: ctx,
+        pr_url: "https://github.com/acme/app/pull/42", gh: gh
+      )
+      runner.send(:base_conflict, rollup, head)
+      assert_equal "base_conflict", runner.blocked.reason
+      assert_includes runner.blocked.detail, "resolve the base conflicts on the source PR"
+      assert_includes runner.blocked.detail, "hive review #{File.basename(task.folder)}"
+      refute_includes runner.blocked.detail, "merge --no-ff"
+      refute_includes runner.blocked.detail, "publication-reconcile"
+      refute_includes runner.blocked.detail, "Unproven local merge"
+
+      # Now create an unproven local 2-parent merge commit at HEAD and verify OID is reported.
+      run!("git", "-C", repo, "checkout", "--quiet", "-b", "other-base")
+      run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "base move")
+      other_tip = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "checkout", "--quiet", "-")
+      run!("git", "-C", repo, "merge", "--no-ff", "--quiet", "-m", "unproven local merge", other_tip)
+      merge_oid = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      runner2 = Hive::Stages::Review::RemoteCi::Runner.new(
+        task: task, cfg: cfg, ctx: ctx,
+        pr_url: "https://github.com/acme/app/pull/42", gh: gh
+      )
+      runner2.send(:base_conflict, rollup, merge_oid)
+      assert_includes runner2.blocked.detail, "Unproven local merge detected at commit #{merge_oid}"
+      assert_includes runner2.blocked.detail, "Preserve this commit"
+    end
+  end
 end

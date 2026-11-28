@@ -51,6 +51,34 @@ module Hive
       )
     end
 
+    def monotonic_deadline(config: nil, project_root: nil, timeout_sec: nil,
+                           monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+      cfg = config || (project_root ? Hive::Config.load(project_root) : nil)
+      seconds = if timeout_sec
+        Float(timeout_sec)
+      else
+        raw = cfg.is_a?(Hash) && (cfg.dig("review", "reconcile_timeout_sec") ||
+                                  cfg.dig("agent_git_gate", "network_timeout_sec"))
+        val = raw ? Float(raw, exception: false) : nil
+        val&.positive? ? val : Reconciler::DEFAULT_NETWORK_TIMEOUT_SEC
+      end
+      monotonic.call + seconds
+    rescue Hive::ConfigError
+      monotonic.call + Reconciler::DEFAULT_NETWORK_TIMEOUT_SEC
+    end
+
+    def with_pr_observation(observation)
+      previous = Thread.current[:hive_internal_pr_observation]
+      Thread.current[:hive_internal_pr_observation] = observation
+      yield
+    ensure
+      Thread.current[:hive_internal_pr_observation] = previous
+    end
+
+    def current_pr_observation
+      Thread.current[:hive_internal_pr_observation]
+    end
+
     def initialize_new_task!(task_folder:, task_id:, task_slug:, project:, pr_host:, pr_repository:,
                              pr_number:, pr_url:, base_ref_name:, head_ref_name:, head_repository:,
                              is_cross_repository:, pr_state:, branch:, head_oid:,

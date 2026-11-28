@@ -243,6 +243,10 @@ module Hive
           payload["reason"] = error.reason
           payload["scope"] = error.scope
         end
+        if error.respond_to?(:reconciliation) && error.reconciliation
+          rec = error.reconciliation
+          payload["reconciliation"] = rec.respond_to?(:to_h) ? rec.to_h : rec
+        end
         payload
       end
     end

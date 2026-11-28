@@ -313,6 +313,10 @@ module Hive
           def base_conflict(rollup, local_head)
             base = rollup["baseRefName"].to_s
             base = @ctx.default_branch.to_s if base.empty?
+            if internal_pr_review_task?
+              detail = internal_pr_base_conflict_detail(rollup, base: base, local_head: local_head)
+              return block!("base_conflict", detail)
+            end
             detail = <<~TEXT
               Pull request #{rollup['url']} conflicts with its base branch `#{base}` at head #{local_head}
               (mergeable=CONFLICTING mergeStateStatus=#{rollup['mergeStateStatus'] || 'unknown'}).
@@ -333,6 +337,60 @@ module Hive
               workflow.retry action so review re-runs on the merged head.
             TEXT
             block!("base_conflict", detail)
+          end
+
+          def internal_pr_review_task?
+            require "hive/internal_pr_checkout"
+            Hive::InternalPrCheckout.applicable?(@task)
+          rescue StandardError
+            false
+          end
+
+          def internal_pr_base_conflict_detail(rollup, base:, local_head:)
+            unproven_oid = detect_unproven_local_merge_oid(local_head)
+            slug = File.basename(@ctx.task_folder.to_s)
+            lines = [
+              "Pull request #{rollup['url']} conflicts with its base branch `#{base}` at head #{local_head}",
+              "(mergeable=CONFLICTING mergeStateStatus=#{rollup['mergeStateStatus'] || 'unknown'}).",
+              "GitHub does not run the full check suite on a conflicting PR, so CI cannot be treated as green.",
+              "",
+              "This task is an internal PR review checkout; Hive does not adopt local base merges on internal review branches.",
+              "Recovery: resolve the base conflicts on the source PR (update and push the PR branch upstream), then explicitly reopen the updated head:",
+              "",
+              "    hive review #{slug}"
+            ]
+            if unproven_oid
+              lines << ""
+              lines << "Unproven local merge detected at commit #{unproven_oid}."
+              lines << "Preserve this commit (for example `git -C #{@ctx.worktree_path} branch preserve-merge-#{unproven_oid[0, 12]} #{unproven_oid}`) before restoring a verified PR checkout."
+            end
+            "#{lines.join("\n")}\n"
+          end
+
+          def detect_unproven_local_merge_oid(local_head)
+            return nil unless @ctx.worktree_path && File.directory?(@ctx.worktree_path)
+
+            require "hive/agent_git_gate"
+            require "hive/internal_pr_checkout"
+            obj_res = Hive::AgentGitGate.read(
+              @ctx.worktree_path, :object_content, oid: local_head, max_stdout_bytes: 64 * 1024
+            )
+            return nil unless obj_res.success?
+
+            header = obj_res.stdout.split("\n\n", 2).first.to_s
+            parents = header.lines.filter_map { |line| line[/\Aparent ([0-9a-f]{40}(?:[0-9a-f]{24})?)$/, 1] }
+            return nil unless parents.length >= 2
+
+            store = Hive::InternalPrCheckout::Store.new(@task.folder)
+            current = store.current_present? ? store.read_current : nil
+            reviewed_oid = current&.dig("reviewed_oid")
+            candidate = store.read_candidate
+            proven_candidate = candidate&.dig("candidate_oid")
+            return local_head if reviewed_oid && local_head != reviewed_oid && local_head != proven_candidate
+
+            nil
+          rescue StandardError
+            nil
           end
 
           def mergeability_unknown(rollup, local_head, timeout_sec)

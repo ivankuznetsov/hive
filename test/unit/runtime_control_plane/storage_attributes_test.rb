@@ -76,6 +76,14 @@ class RuntimeStorageAttributesTest < Minitest::Test
     end
   end
 
+  def test_successful_tool_returns_its_output_verbatim
+    with_env("PATH" => @root) do
+      script = File.join(@root, "fake-probe")
+      File.write(script, "#!/bin/sh\necho '9123683e btrfs'\n", perm: 0o700)
+      assert_equal "9123683e btrfs\n", Hive::RuntimeControlPlane::StorageAttributes.run_command("fake-probe")
+    end
+  end
+
   def test_failed_tool_and_bounded_timeout
     probe = Hive::RuntimeControlPlane::StorageAttributes.method(:run_command)
     with_env("PATH" => @root) do

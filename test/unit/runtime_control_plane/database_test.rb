@@ -562,6 +562,42 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     assert_empty offenders
   end
 
+  def test_inspection_uses_read_only_database_in_place_unless_a_rollback_journal_is_present
+    with_database do |database, path|
+      database.disconnect
+      mount = mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      read_only = database_with_mountinfo(path, mountinfo: mount)
+      inspected = read_only.with_inspection_snapshot { |snapshot| snapshot }
+      assert_same read_only, inspected
+
+      File.write("#{path}-journal", "", perm: 0o600)
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        read_only.with_inspection_snapshot { flunk "database with rollback journal was yielded" }
+      end
+      assert_equal :inspection_unavailable, error.code
+      assert_includes error.message, "rollback journal present"
+    end
+  end
+
+  def test_inspection_rejects_a_database_that_changed_during_copy
+    with_database do |database, path|
+      database.disconnect
+      copy = IO.method(:copy_stream)
+      changed_source = lambda do |input, output|
+        bytes = copy.call(input, output)
+        File.utime(Time.at(0), Time.at(0), path)
+        bytes
+      end
+      error = with_replaced_singleton_method(IO, :copy_stream, changed_source) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          database.with_inspection_snapshot { flunk "stale snapshot was yielded" }
+        end
+      end
+      assert_equal :inspection_unavailable, error.code
+      assert_includes error.message, "source changed during copy"
+    end
+  end
+
   def test_read_only_preview_refuses_an_unpaired_recovery_sidecar
     with_database do |database, path|
       database.disconnect

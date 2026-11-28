@@ -30,18 +30,81 @@ class LlmWikiSchedulerTest < Minitest::Test
       service = File.read(services.first)
       encoded_main = Hive::LlmWikiBootstrap::Scheduler.systemd_path(main)
       encoded_linked = Hive::LlmWikiBootstrap::Scheduler.systemd_path(linked)
-      assert_includes service, "WorkingDirectory=#{encoded_main}"
+      assert_includes service, "WorkingDirectory=#{main}"
       assert_includes service, "MemoryMax=4G"
       assert_includes service, "MemorySwapMax=0"
       assert_includes service, "X-HiveManaged=yes"
       assert_includes service, "Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1"
       shared_runner = File.join(main, ".git", "llm-wiki", "post-commit-refresh.sh")
-      assert_includes service, "ConditionFileIsExecutable=#{scheduler_path(shared_runner)}"
+      assert_includes service, "ConditionFileIsExecutable=#{shared_runner}"
       assert_includes service, "#{scheduler_path(shared_runner)} --project #{encoded_main} --drain"
       assert File.executable?(shared_runner)
       assert_equal File.basename(services.first),
                    File.read(File.join(main, ".git", "llm-wiki", "scheduler-service")).strip
       refute_includes service, encoded_linked
+    end
+  end
+
+  def test_service_preserves_literal_directives_and_encodes_each_command_word
+    [
+      [ "wiki test", "wiki test", 'wiki\x20test' ],
+      [ '\x20\x22\x41', '\x20\x22\x41', '\x5cx20\x5cx22\x5cx41' ],
+      [ "a\\\\b'\"", "a\\\\b'\"", 'a\x5c\x5cb\x27\x22' ],
+      [ "%t%%$$${NAME}é", "%%t%%%%$$${NAME}é", "%%t%%%%$$${NAME}é" ],
+      [ "a\tb", "a\tb", 'a\x09b' ]
+    ].each do |name, directive, word|
+      unit = Hive::LlmWikiBootstrap::Scheduler.systemd_service(
+        "/tmp/#{name}", "probe.service", flock_path: "/bin/fl%ock"
+      ).lines(chomp: true)
+      assert_includes unit, "X-HivePathEncoding=literal-v1"
+      assert_includes unit, "WorkingDirectory=/tmp/#{directive}"
+      assert_includes unit, "ConditionFileIsExecutable=/tmp/#{directive}/.llm-wiki/refresh-wiki.sh"
+      assert_includes unit, "ExecStart=:/bin/fl%%ock --nonblock --conflict-exit-code 0 " \
+                            "%t/llm-wiki-refresh.lock /tmp/#{word}/.llm-wiki/refresh-wiki.sh --project /tmp/#{word} --drain"
+    end
+  end
+
+  def test_unrepresentable_roots_fail_before_installation
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      [ "nul\0", "line\nbreak", "cr\r", "bad\xff", "end\\", "end ", "end\t" ].each do |name|
+        project = "#{root}/#{name}"
+        assert_raises(ArgumentError) do
+          Hive::LlmWikiBootstrap::Scheduler.systemd_service(project, "probe.service")
+        end
+        next if name.include?("\0")
+
+        run_git("init", "-q", project)
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        File.write(File.join(project, ".llm-wiki/config.json"), '{"created_by":"hive"}')
+        with_env("HOME" => home, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil) do
+          capture_io { Hive::LlmWikiBootstrap::Scheduler.install(project) }
+        end
+        refute_path_exists File.join(project, ".git/llm-wiki")
+        refute_path_exists home
+      end
+    end
+  end
+
+  def test_both_shared_runtime_writers_preserve_git_common_directory_trailing_space
+    with_tmp_dir do |root|
+      common = File.join(root, "metadata ")
+      sibling = common.rstrip
+      project = File.join(root, "wiki test")
+      run_git("init", "-q", "--separate-git-dir", common, project)
+      FileUtils.mkdir_p(sibling)
+      assert_equal common, Hive::LlmWikiBootstrap.git_common_dir(project)
+      Hive::LlmWikiBootstrap.install!(project, scheduler: false)
+      assert File.executable?(File.join(common, "llm-wiki/post-commit-refresh.sh"))
+      assert_empty Dir.children(sibling)
+      with_env("HOME" => root, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1") do
+        Hive::LlmWikiBootstrap::Scheduler.install(project)
+      end
+      service = File.read(Dir[File.join(root, ".config/systemd/user/*.service")].fetch(0))
+      assert_includes service, "WorkingDirectory=#{project}\n"
+      assert_includes service, "ConditionFileIsExecutable=#{common}/llm-wiki/post-commit-refresh.sh\n"
+      assert_includes service, "#{sibling}\\x20/llm-wiki/post-commit-refresh.sh --project "
+      assert_empty Dir.children(sibling)
     end
   end
 

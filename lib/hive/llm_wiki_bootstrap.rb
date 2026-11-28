@@ -222,6 +222,12 @@ module Hive
         raise ArgumentError, "cannot resolve primary Git worktree for #{project_root}: #{err.strip}"
       end
 
+      # With --separate-git-dir Git lists the metadata directory as the first
+      # worktree. The primary checkout's gitfile identifies it unambiguously.
+      if File.file?(File.join(project_root, ".git"))
+        dir, _, git_status = Open3.capture3("git", "-C", project_root, "rev-parse", "--absolute-git-dir")
+        return File.expand_path(project_root) if git_status.success? && dir.delete_suffix("\n") == primary
+      end
       File.expand_path(primary)
     end
 
@@ -251,11 +257,13 @@ module Hive
       out, err, status = Open3.capture3(
         "git", "-C", project_root, "rev-parse", "--path-format=absolute", "--git-common-dir"
       )
-      unless status.success? && !out.strip.empty?
+      path = out.delete_suffix("\n")
+      unless status.success? && path.dup.force_encoding(Encoding::UTF_8).valid_encoding? &&
+             path.start_with?("/") && !path.match?(/[\0\r\n]/)
         raise ArgumentError, "cannot resolve Git common directory for #{project_root}: #{err.strip}"
       end
 
-      File.expand_path(out.strip, project_root)
+      path
     end
 
     def project_slug(project_root)

@@ -16,6 +16,7 @@ module Hive
       def install(project_root)
         return if scheduler_disabled?
 
+        validate_path!(File.expand_path(project_root))
         project_root = scheduled_project_root(project_root)
         return unless project_root
 
@@ -23,7 +24,6 @@ module Hive
         return unless flock_path
 
         user_dir = systemd_user_dir
-        FileUtils.mkdir_p(user_dir)
         changed, timer_name, service_name = install_root(
           project_root, user_dir, flock_path, enable_timer: true
         )
@@ -137,16 +137,11 @@ module Hive
         slug = raw_project_slug(project_root)
         service_name = "#{UNIT_PREFIX}#{slug}.service"
         timer_name = "#{UNIT_PREFIX}#{slug}.timer"
-        refresh_script, runtime_changed = deploy_shared_runtime(project_root, service_name: service_name)
-        service_changed = write_if_changed(
-          File.join(user_dir, service_name),
-          systemd_service(
-            project_root,
-            service_name,
-            flock_path: flock_path,
-            refresh_script: refresh_script
-          )
-        )
+        shared_dir = File.join(Hive::LlmWikiBootstrap.git_common_dir(project_root), "llm-wiki")
+        refresh_script = File.join(shared_dir, "post-commit-refresh.sh")
+        service = systemd_service(project_root, service_name, flock_path: flock_path, refresh_script: refresh_script)
+        runtime_changed = deploy_shared_runtime(project_root, shared_dir, service_name: service_name)
+        service_changed = write_if_changed(File.join(user_dir, service_name), service)
         changed = runtime_changed || service_changed
         changed = write_if_changed(
           File.join(user_dir, timer_name),
@@ -156,8 +151,7 @@ module Hive
         [ changed, timer_name, service_name ]
       end
 
-      def deploy_shared_runtime(project_root, service_name:)
-        shared_dir = File.join(Hive::LlmWikiBootstrap.git_common_dir(project_root), "llm-wiki")
+      def deploy_shared_runtime(project_root, shared_dir, service_name:)
         refresh_script = File.join(shared_dir, "post-commit-refresh.sh")
         changed = write_if_changed(
           refresh_script,
@@ -172,7 +166,7 @@ module Hive
         config = File.binread(File.join(project_root, ".llm-wiki", "config.json"))
         changed = write_if_changed(File.join(shared_dir, "config.json"), config) || changed
         changed = write_if_changed(File.join(shared_dir, "scheduler-service"), "#{service_name}\n") || changed
-        [ refresh_script, changed ]
+        changed
       end
 
       def write_if_changed(path, contents, mode: nil)
@@ -209,20 +203,20 @@ module Hive
         raise ArgumentError, "flock is required for the LLM-wiki scheduler" unless flock_path
 
         refresh_script ||= File.join(project_root, ".llm-wiki", "refresh-wiki.sh")
-        encoded_refresh_script = systemd_path(refresh_script)
-        encoded_project_root = systemd_path(project_root)
+        [ project_root, refresh_script, flock_path ].each { |path| validate_path!(path) }
 
         <<~UNIT
           [Unit]
           Description=Refresh LLM wiki for #{service_name.sub(/\.service\z/, "")}
           X-HiveManaged=yes
-          ConditionFileIsExecutable=#{encoded_refresh_script}
+          X-HivePathEncoding=literal-v1
+          ConditionFileIsExecutable=#{literal_path(refresh_script)}
 
           [Service]
           Type=oneshot
           Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1
-          WorkingDirectory=#{encoded_project_root}
-          ExecStart=#{systemd_path(flock_path)} --nonblock --conflict-exit-code 0 %t/llm-wiki-refresh.lock #{encoded_refresh_script} --project #{encoded_project_root} --drain
+          WorkingDirectory=#{literal_path(project_root)}
+          ExecStart=:#{command_word(flock_path)} --nonblock --conflict-exit-code 0 %t/llm-wiki-refresh.lock #{command_word(refresh_script)} --project #{command_word(project_root)} --drain
           # A scheduled drain may run three batches. Each batch permits a
           # 30-minute agent plus two independently bounded 15-minute QMD
           # phases, so the outer service must outlive that bounded worst case.
@@ -247,6 +241,22 @@ module Hive
           [Install]
           WantedBy=timers.target
         UNIT
+      end
+
+      def validate_path!(path)
+        unless path.dup.force_encoding(Encoding::UTF_8).valid_encoding? &&
+               path.start_with?("/") && !path.match?(/[\x00-\x08\x0a-\x1f\x7f]|[\\ \t]\z/) &&
+               File.expand_path(path) == path
+          raise ArgumentError, "unrepresentable LLM-wiki scheduler pathname: #{path.inspect}"
+        end
+      end
+
+      def literal_path(path)
+        path.gsub("%", "%%")
+      end
+
+      def command_word(path)
+        literal_path(path).gsub(/[ \t"'\\]/) { |char| format("\\x%02x", char.ord) }
       end
 
       def systemd_path(path)
@@ -277,18 +287,8 @@ module Hive
       # failures are fail-closed so a transient Git problem cannot recreate a
       # timer for every linked checkout.
       def scheduled_project_root(project_root)
-        expanded_root = File.expand_path(project_root)
-        out, _err, status = Open3.capture3(
-          "git", "-C", expanded_root, "worktree", "list", "--porcelain", "-z"
-        )
-        return unless status.success?
-
-        record = out.split("\0").find { |field| field.start_with?("worktree ") }
-        path = record&.delete_prefix("worktree ")
-        return if path.nil? || path.empty?
-
-        File.expand_path(path)
-      rescue Errno::ENOENT
+        Hive::LlmWikiBootstrap.primary_worktree_root(File.expand_path(project_root))
+      rescue Errno::ENOENT, ArgumentError
         nil
       end
 
@@ -326,7 +326,10 @@ module Hive
 
       def working_directory(contents)
         encoded = contents[/^WorkingDirectory=(.+)$/, 1]
-        encoded && decode_systemd_path(encoded)
+        return unless encoded
+        return encoded.gsub("%%", "%") if contents.lines.include?("X-HivePathEncoding=literal-v1\n")
+
+        decode_systemd_path(encoded)
       end
 
       def hive_managed_root?(project_root)

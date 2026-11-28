@@ -94,6 +94,8 @@ else
 end
 
 require "hive"
+require_relative "support/non_btrfs_storage"
+ENV["HIVE_TEST_STORAGE_BOOT"] = File.expand_path("support/non_btrfs_storage.rb", __dir__)
 require_relative "support/workflow_helpers"
 require_relative "support/failure_evidence"
 

@@ -528,6 +528,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       script = <<~'RUBY'
         require "json"
         require "stringio"
+        require ENV.fetch("HIVE_TEST_STORAGE_BOOT")
         require "hive/commands/doctor"
         input = JSON.parse(STDIN.read)
         inspector = Object.new

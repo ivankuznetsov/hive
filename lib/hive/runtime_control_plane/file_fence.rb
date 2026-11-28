@@ -12,6 +12,10 @@ module Hive
 
       attr_reader :path, :mode
 
+      def self.safe_directory?(status)
+        status.directory? && !status.symlink? && status.uid == Process.uid && (status.mode & 0o022).zero?
+      end
+
       def initialize(path:, timeout_sec:, monotonic_clock: nil, sleeper: nil,
                      label: "runtime fence")
         @path = File.expand_path(path)
@@ -92,9 +96,7 @@ module Hive
         parent = File.dirname(path)
         FileUtils.mkdir_p(parent, mode: 0o700)
         status = File.lstat(parent)
-        valid = status.directory? && !status.symlink? && status.uid == Process.uid &&
-          (status.mode & 0o022).zero?
-        raise Hive::ConfigError, "#{@label} directory is unsafe" unless valid
+        raise Hive::ConfigError, "#{@label} directory is unsafe" unless FileFence.safe_directory?(status)
       end
 
       def validate_binding!(handle)

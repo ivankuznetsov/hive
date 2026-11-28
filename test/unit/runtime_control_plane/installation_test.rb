@@ -72,6 +72,7 @@ class RuntimeControlPlaneInstallationTest < Minitest::Test
     %w[before after].each do |point|
       with_tmp_dir do |root|
         code = <<~'RUBY'
+          require ENV.fetch("HIVE_TEST_STORAGE_BOOT")
           require "hive"
           require "hive/runtime_control_plane/installation"
           root, point = ARGV

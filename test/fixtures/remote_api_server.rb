@@ -26,6 +26,7 @@ FileUtils.mkdir_p(ENV.fetch("HIVE_HOME"))
 require_relative "../../web/config/environment"
 require "hive/commands/init"
 require "hive/runtime_control_plane/installation"
+require_relative "../support/non_btrfs_storage"
 require "hive/runtime_control_plane/command_schema_installation"
 require "hive/remote/token_store"
 require "hive/operational_action"

@@ -1,10 +1,15 @@
 require "fileutils"
 require "json"
-require "open3"
+require "securerandom"
+require "thread"
 require "time"
 require "yaml"
+require "hive/agent_git_gate"
+require "hive/atomic_file"
 require "hive/config"
 require "hive/gh"
+require "hive/internal_pr_checkout"
+require "hive/lock"
 require "hive/pr"
 require "hive/task_counter"
 require "hive/task"
@@ -22,11 +27,25 @@ module Hive
 
       SOURCE = "ad-hoc".freeze
       REVIEW_STAGE = Hive::Workflows.for_verb("review").fetch(:target).freeze
+      CLAIMS_DIR = ".adhoc-review-claims".freeze
+      CLAIM_SCHEMA = "hive.adhoc-review.creation-claim".freeze
+      DEFAULT_CLAIM_WAIT_SEC = 30.0
+      CLAIM_POLL_INTERVAL_SEC = 0.02
 
-      def initialize(pr:, project: nil, json: false)
+      ACTIVE_CLAIMS_MUTEX = Mutex.new
+      ACTIVE_CLAIMS = {}
+
+      def initialize(pr:, project: nil, json: false, gh: Hive::Gh, gate: Hive::AgentGitGate,
+                     allow_local_transport: nil, claim_wait_timeout: DEFAULT_CLAIM_WAIT_SEC,
+                     failpoint: nil)
         @pr_identifier = pr
         @project_name = project
         @json = json
+        @gh = gh
+        @gate = gate
+        @allow_local_transport = allow_local_transport
+        @claim_wait_timeout = Float(claim_wait_timeout)
+        @failpoint = failpoint
       end
 
       def call
@@ -34,51 +53,45 @@ module Hive
       end
 
       def enqueue(now: Time.now)
-        # call_with_envelope (Hive::Schemas::EnvelopeEmitter) owns the twin
-        # Hive::Error / StandardError rescue + --json error-envelope emission so
-        # this command can't drift from the shared emitter. `next` (not
-        # `return`) yields the reuse short-circuit value back through the block.
         call_with_envelope do
           project = Hive::Config.registered_project!(name: @project_name, cwd: Dir.pwd)
           project_root = project.fetch("path")
           project_name = project.fetch("name")
-          # Resolve hive_state_path through the SAME resolver registered_project!
-          # validates with (project-relative entries are joined against the
-          # project root). Consuming the raw registry value here would interpret
-          # a hand-edited *relative* hive_state_path against the caller's cwd —
-          # validation would pass while sidecars landed in the wrong place.
           hive_state_path = Hive::Config.project_hive_state_path(project)
-          # Parse the identifier in its own narrow rescue (see parse_pr_number!)
-          # so only an invalid identifier maps to a USAGE error; an ArgumentError
-          # from anywhere else stays a genuine InternalError below.
           pr_number = parse_pr_number!
-          slug = slug_for(pr_number)
+          slug = Hive::InternalPrCheckout::Identity.slug_for(pr_number)
 
-          next reuse(slug, hive_state_path, project_name) if reusable_folder?(hive_state_path, slug, pr_number)
-
-          refuse_if_owned!(hive_state_path, slug, pr_number)
-
-          # Fetch PR metadata only once we know we will create — after the reuse
-          # short-circuit and ownership check — so a re-run reuses offline and a
-          # collision fails without a needless `gh pr view` round-trip. chdir to
-          # the resolved project so `--project` queries the right repo, not cwd.
-          # Thread the project cfg so the configured `gh.network_timeout_sec`
-          # applies, matching the sibling gh helpers.
           cfg = Hive::Config.load(project_root)
-          metadata = Hive::Gh.pr_metadata(pr_number, cfg: cfg, chdir: project_root)
+          worktree_root = Hive::Worktree.canonical_root(project_root, config: cfg)
+          worktree_path = Hive::InternalPrCheckout::Identity.worktree_path_for(project_root, slug, config: cfg)
+          branch = Hive::InternalPrCheckout::Identity.branch_for(pr_number)
 
-          task_folder = create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
+          disposition, claim = acquire_or_reuse!(
+            hive_state_path: hive_state_path,
+            project_root: project_root,
+            project_name: project_name,
+            worktree_root: worktree_root,
+            worktree_path: worktree_path,
+            slug: slug,
+            pr_number: pr_number,
+            branch: branch,
+            now: now
+          )
+          next disposition if disposition
+
+          task_folder = create_claimed_task!(
+            hive_state_path: hive_state_path,
+            project_root: project_root,
+            project_name: project_name,
+            worktree_root: worktree_root,
+            cfg: cfg,
+            claim: claim,
+            now: now
+          )
           { slug: slug, project: project_name, task_folder: task_folder, reused: false }
         end
       end
 
-      # EnvelopeEmitter hooks — emit the standard hive-stage-action error
-      # envelope on stdout under `--json` so a create-phase failure (bad
-      # identifier, not-invited, refuse-to-shadow collision, gh/auth/worktree
-      # setup error) surfaces the same structured JSON an agent gets from
-      # StageAction. bin/hive still maps the exit code + prints the stderr line
-      # after the re-raise; StageAction owns the envelope once the task exists,
-      # so the two never double-emit.
       def envelope_schema
         "hive-stage-action"
       end
@@ -108,39 +121,104 @@ module Hive
         }
       end
 
-      def slug_for(pr_number)
-        "adhoc-review-pr-#{pr_number}"
-      end
-
-      # The deterministic 6-review folder for an ad-hoc slug. One home for the
-      # path so `reuse`, `reusable_folder?`, and `create_task!` can't drift.
       def review_task_folder(hive_state_path, slug)
         File.join(hive_state_path, "stages", REVIEW_STAGE, slug)
       end
 
-      def reusable_folder?(hive_state_path, slug, pr_number)
-        folder = review_task_folder(hive_state_path, slug)
-        return false unless File.directory?(folder)
-
-        validate_reusable!(folder, slug, pr_number)
-        true
+      def claims_dir(hive_state_path)
+        File.join(hive_state_path, CLAIMS_DIR)
       end
 
-      # A 6-review folder at the deterministic ad-hoc slug is only reusable when
-      # it is actually this PR's ad-hoc review. A normal task (or a wrong-PR
-      # task) that happens to carry the same slug would otherwise be silently
-      # adopted and re-run as the ad-hoc review; refuse it instead, mirroring
-      # the refuse-to-shadow guard in refuse_if_owned!.
+      def claim_path_for(hive_state_path, slug)
+        File.join(claims_dir(hive_state_path), "#{slug}.json")
+      end
+
+      # Reserve `(project, pr_number, slug)` under the short project commit lock
+      # before allocating an ID, fetching PR metadata, or touching Git state.
+      # Concurrent callers seeing a live claim wait outside the commit lock and
+      # reuse the published winner or claim after a failed owner rolls back.
+      def acquire_or_reuse!(hive_state_path:, project_root:, project_name:, worktree_root:,
+                            worktree_path:, slug:, pr_number:, branch:, now:)
+        wait_deadline = monotonic_now + @claim_wait_timeout
+        claim_path = claim_path_for(hive_state_path, slug)
+
+        loop do
+          @failpoint&.call(:before_claim_lock, slug: slug, pr_number: pr_number)
+          outcome = Hive::Lock.with_commit_lock(hive_state_path) do
+            folder = review_task_folder(hive_state_path, slug)
+            if File.directory?(folder)
+              validate_reusable!(folder, slug, pr_number)
+              next [ :reuse, reuse(slug, hive_state_path, project_name) ]
+            end
+
+            refuse_if_owned!(hive_state_path, slug, pr_number)
+
+            existing = read_claim(claim_path)
+            if existing
+              if claim_owner_alive?(claim_path, existing)
+                next [ :wait, nil ]
+              end
+
+              # Stale claim from a dead owner: clean ONLY proven owner-acquired resources.
+              rollback_owned_resources!(
+                project_root: project_root,
+                worktree_root: worktree_root,
+                claim: existing,
+                strict: true
+              )
+              remove_claim_file!(claim_path, expected_token: existing["owner_token"])
+            end
+
+            owner_token = SecureRandom.hex(12)
+            staging_dir = File.join(claims_dir(hive_state_path), "#{slug}.staging-#{owner_token}")
+            quarantine_ref = Hive::InternalPrCheckout::Identity.quarantine_ref_for("create-#{owner_token}")
+            claim = {
+              "schema" => CLAIM_SCHEMA,
+              "schema_version" => 1,
+              "owner_token" => owner_token,
+              "pid" => Process.pid,
+              "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+              "project" => project_name,
+              "pr_number" => pr_number,
+              "slug" => slug,
+              "branch" => branch,
+              "worktree_path" => worktree_path,
+              "quarantine_ref" => quarantine_ref,
+              "staging_dir" => staging_dir,
+              "task_folder" => folder,
+              "head_oid" => nil,
+              "resources" => {},
+              "created_at" => now.utc.iso8601(6)
+            }
+            write_claim!(claim_path, claim)
+            register_in_process_claim(claim_path, owner_token)
+            [ :claimed, claim ]
+          end
+
+          case outcome.first
+          when :reuse
+            return [ outcome.last, nil ]
+          when :claimed
+            @failpoint&.call(:after_claim_acquired, outcome.last)
+            return [ nil, outcome.last ]
+          when :wait
+            if monotonic_now >= wait_deadline
+              raise Hive::ConcurrentRunError.new(
+                "another hive review --pr #{pr_number} creation is in progress for #{slug}",
+                lock_path: claim_path
+              )
+            end
+            sleep CLAIM_POLL_INTERVAL_SEC
+          end
+        end
+      end
+
+      # Validate deterministic task/PR ownership only — never run permissive
+      # worktree inspection or make checkout decisions here. U2 owns all
+      # existing-task checkout verification and reconciliation.
       def validate_reusable!(folder, slug, pr_number)
-        # Read pr.md through the SystemCallError-guarded helper the collision
-        # scan uses (not bare pr_frontmatter, which rescues only Psych) so a
-        # permission/IO error on this one file surfaces as a clean collision
-        # message rather than a wrapped InternalError. nil (unreadable) falls
-        # through to the refuse branch, which already points at `hive drop`.
-        frontmatter = read_pr_frontmatter_for_scan(File.join(folder, "pr.md")) || {}
-        # casecmp? matches the review stage's reader (review.rb adhoc_task?):
-        # a drifted `source: Ad-Hoc` must not route as ad-hoc there yet be
-        # rejected here.
+        pr_path = File.join(folder, "pr.md")
+        frontmatter = read_reusable_pr_frontmatter!(pr_path, slug, pr_number)
         source = frontmatter["source"].to_s.strip
         owned_pr = frontmatter["pr_number"].to_i
         unless source.casecmp?(SOURCE) && owned_pr == pr_number.to_i
@@ -149,37 +227,28 @@ module Hive
                 "(source=#{source.inspect}, pr_number=#{owned_pr}); " \
                 "run `hive drop #{slug}` before creating an ad-hoc review"
         end
-
-        verify_reusable_worktree!(folder, slug)
+        true
       end
 
-      # The reuse path returns the existing task without re-materializing, so
-      # its carried-over worktree must still be on disk. A pruned or
-      # hand-removed worktree would otherwise pass enqueue and only fail deep
-      # in the review stage ("worktree pointer present but worktree missing").
-      # Surface it cleanly here, pointing at the explicit-teardown path.
-      def verify_reusable_worktree!(folder, slug)
-        pointer = Hive::Worktree.read_pointer(folder)
-        worktree_path = pointer && pointer["path"]
-        return if worktree_path && File.directory?(worktree_path)
-
-        # Distinguish the three failure modes so the remediation hint matches
-        # the real cause. read_pointer swallows a permission/parse error on
-        # worktree.yml to nil, which previously surfaced an unreadable pointer
-        # as "worktree is missing (no worktree.yml path)" — pointing at the
-        # wrong cause.
-        detail =
-          if worktree_path
-            "its worktree is missing (#{worktree_path})"
-          elsif File.exist?(File.join(folder, "worktree.yml"))
-            "its worktree pointer #{File.join(folder, 'worktree.yml')} is unreadable or has no path"
-          else
-            "its worktree pointer #{File.join(folder, 'worktree.yml')} is missing"
-          end
-
-        raise CollisionError,
-              "ad-hoc review folder #{slug} exists but #{detail}; " \
-              "run `hive drop #{slug}` and re-run to recreate it"
+      def read_reusable_pr_frontmatter!(pr_path, slug, pr_number)
+        unless File.exist?(pr_path) || File.symlink?(pr_path)
+          raise CollisionError,
+                "review folder #{slug} already exists but is missing pr.md for PR ##{pr_number}; " \
+                "run `hive drop #{slug}` before creating an ad-hoc review"
+        end
+        stat = File.lstat(pr_path)
+        if stat.symlink? || !stat.file?
+          raise CollisionError,
+                "review folder #{slug} has an unsafe pr.md (not a regular file); " \
+                "run `hive drop #{slug}` before creating an ad-hoc review"
+        end
+        frontmatter = read_pr_frontmatter_for_scan(pr_path)
+        unless frontmatter.is_a?(Hash) && !frontmatter.empty?
+          raise CollisionError,
+                "review folder #{slug} has unreadable pr.md frontmatter for PR ##{pr_number}; " \
+                "run `hive drop #{slug}` before creating an ad-hoc review"
+        end
+        frontmatter
       end
 
       def refuse_if_owned!(hive_state_path, slug, pr_number)
@@ -210,10 +279,6 @@ module Hive
         end.first
       end
 
-      # pr_frontmatter rescues only Psych errors; a permission error or an
-      # ENOENT TOCTOU race on another task's pr.md would otherwise abort the
-      # whole ownership scan and block ad-hoc review for every PR. Skip the
-      # unreadable file (loudly) so one bad sidecar can't wedge the command.
       def read_pr_frontmatter_for_scan(path)
         Hive::Gh.pr_frontmatter(path)
       rescue SystemCallError => e
@@ -229,51 +294,224 @@ module Hive
               "run `hive review #{slug}` to continue it or `hive drop #{slug}` before creating an ad-hoc review"
       end
 
-      def materialize(project_root, slug, pr_number)
-        Hive::Worktree.materialize_pr(
-          repo_root: project_root,
-          pr_number: pr_number,
-          path: worktree_path_for(project_root, slug),
-          branch: branch_for(pr_number)
+      def create_claimed_task!(hive_state_path:, project_root:, project_name:, worktree_root:,
+                               cfg:, claim:, now:)
+        claim_path = claim_path_for(hive_state_path, claim.fetch("slug"))
+        owner_token = claim.fetch("owner_token")
+        pr_number = claim.fetch("pr_number")
+        slug = claim.fetch("slug")
+        branch = claim.fetch("branch")
+        worktree_path = claim.fetch("worktree_path")
+        quarantine_ref = claim.fetch("quarantine_ref")
+        staging_dir = claim.fetch("staging_dir")
+        task_folder = claim.fetch("task_folder")
+        allow_local = allow_local_transport?(cfg)
+        published = false
+
+        # Slow provider + Git operations run OUTSIDE the short project commit lock.
+        @gate.verify_repository_config!(project_root)
+        remote_info = validate_origin_remote!(project_root, allow_local: allow_local)
+        deadline = monotonic_now + network_timeout_sec(cfg)
+
+        metadata = @gh.validated_pr_metadata(
+          pr_number,
+          expected_host: remote_info[:host],
+          expected_repository: remote_info[:repository],
+          cfg: cfg,
+          chdir: project_root,
+          deadline: deadline
         )
-      end
+        head_oid = validated_provider_head!(pr_number, metadata)
+        parsed_url = Hive::Gh.parse_pull_request_url(metadata.url)
+        unless parsed_url && parsed_url.fetch("number") == pr_number
+          raise Hive::GhError, "PR ##{pr_number} metadata URL #{metadata.url.inspect} is not canonical"
+        end
 
-      def worktree_path_for(project_root, slug)
-        File.join(Hive::Worktree.canonical_root(project_root), slug)
-      end
+        claim = claim.merge("head_oid" => head_oid)
+        persist_claim_if_owned!(hive_state_path, claim_path, claim)
 
-      def branch_for(pr_number)
-        "hive/review/pr-#{pr_number}"
-      end
+        ensure_no_preexisting_git_residue!(project_root, worktree_path: worktree_path, branch: branch)
 
-      def create_task!(hive_state_path, project_root, slug, pr_number, metadata, now)
-        task_folder = review_task_folder(hive_state_path, slug)
-        FileUtils.mkdir_p(File.join(task_folder, "reviews"))
-        # Proactively clear an orphan worktree/branch/ref BEFORE materializing
-        # (mirrors Hive::Babysitter::Worktree#remove_existing!): a prior
-        # SIGKILL after `git worktree add` leaves `.git/worktrees/<slug>` admin
-        # metadata that makes this run's add fail with "already exists in the
-        # worktree list". Without this the first retry fails and only the
-        # second self-heals; with it a single retry is clean.
-        remove_orphan_worktree!(project_root, slug, pr_number)
-        materialized = materialize(project_root, slug, pr_number)
-        verify_head!(pr_number, metadata, materialized)
-        write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
-        initialize_journal!(task_folder, materialized, now)
+        claim = record_claim_resource!(
+          hive_state_path, claim_path, claim,
+          "quarantine_ref", { "ref" => quarantine_ref, "oid" => head_oid }
+        )
+        @gate.fetch_pull_request_commit(
+          repository_path: project_root,
+          pr_number: pr_number,
+          expected_oid: head_oid,
+          quarantine_ref: quarantine_ref,
+          expected_remote_fingerprint: remote_info.fetch(:fingerprint),
+          allow_local_transport: allow_local,
+          deadline: deadline
+        )
+        @failpoint&.call(:after_fetch, claim)
+
+        claim = record_claim_resource!(
+          hive_state_path, claim_path, claim,
+          "branch", { "ref" => "refs/heads/#{branch}", "oid" => head_oid }
+        )
+        claim = record_claim_resource!(
+          hive_state_path, claim_path, claim,
+          "worktree", { "path" => worktree_path, "branch" => branch, "oid" => head_oid }
+        )
+        if File.symlink?(worktree_root)
+          raise Hive::WorktreeError, "worktree root #{worktree_root} must be a real directory, not a symlink"
+        end
+        FileUtils.mkdir_p(worktree_root) unless File.directory?(worktree_root)
+
+        receipt = @gate.materialize_owned_branch(
+          repository_path: project_root,
+          branch: branch,
+          oid: head_oid,
+          destination: worktree_path,
+          destination_root: worktree_root
+        )
+        unless receipt.oid == head_oid
+          raise Hive::WorktreeError,
+                "PR ##{pr_number} materialized at #{receipt.oid}, but GitHub reported head #{head_oid}"
+        end
+        @failpoint&.call(:after_materialize, claim)
+
+        # Stage complete task folder + generation 1 before atomic publication.
+        claim = record_claim_resource!(
+          hive_state_path, claim_path, claim,
+          "staging_dir", { "path" => staging_dir }
+        )
+        build_staged_task_folder!(
+          staging_dir: staging_dir,
+          slug: slug,
+          project_name: project_name,
+          pr_number: pr_number,
+          parsed_url: parsed_url,
+          metadata: metadata,
+          head_oid: head_oid,
+          worktree_path: receipt.destination,
+          branch: branch,
+          now: now
+        )
+        @failpoint&.call(:before_publish, claim)
+
+        # Publish atomically under short project commit lock.
+        Hive::Lock.with_commit_lock(hive_state_path) do
+          current_claim = read_claim(claim_path)
+          unless current_claim && current_claim["owner_token"] == owner_token
+            raise Hive::ConcurrentRunError.new("creation claim ownership lost for #{slug}", lock_path: claim_path)
+          end
+          if File.exist?(task_folder) || File.symlink?(task_folder)
+            raise CollisionError, "review folder #{slug} appeared before publication"
+          end
+          refuse_if_owned!(hive_state_path, slug, pr_number)
+
+          FileUtils.mkdir_p(File.dirname(task_folder))
+          File.rename(staging_dir, task_folder)
+          Hive::AtomicFile.fsync_directory(File.dirname(task_folder))
+          published = true
+
+          cleanup_quarantine_ref_safely(project_root, quarantine_ref: quarantine_ref, expected_oid: head_oid)
+          remove_claim_file!(claim_path, expected_token: owner_token)
+          deregister_in_process_claim(claim_path, owner_token)
+        end
+
         task_folder
       rescue StandardError
-        cleanup_failed_task!(project_root, slug, pr_number, task_folder)
+        unless published
+          rollback_claimed_creation!(
+            hive_state_path: hive_state_path,
+            project_root: project_root,
+            worktree_root: worktree_root,
+            claim_path: claim_path,
+            owner_token: owner_token
+          )
+        end
         raise
       end
 
-      def initialize_journal!(task_folder, materialized, now)
-        task = Hive::Task.new(task_folder)
+      def validate_origin_remote!(project_root, allow_local:)
+        urls = @gate.remote_urls(repository_path: project_root, remote: "origin", push: false)
+        unless urls.one?
+          raise Hive::WorktreeError, "origin remote must resolve to exactly one fetch URL (found #{urls.size})"
+        end
+        url = urls.first
+        fingerprint = @gate.remote_target_fingerprint(
+          repository_path: project_root,
+          remote: "origin",
+          push: false,
+          allow_local_transport: allow_local
+        )
+        github_shaped = url.match?(/\A(?:https?|ssh|git):\/\//i) ||
+                        (url.match?(/\A(?:[^@\/]+@)?[^:\/]+:.+\z/) && !url.start_with?("/"))
+        host = nil
+        repository = nil
+        if !allow_local || github_shaped
+          remote_id = Hive::Gh.repository_identity_from_remote(url)
+          host = remote_id.fetch("host").downcase
+          repository = remote_id.fetch("repository").downcase
+        end
+        { url: url, fingerprint: fingerprint, host: host, repository: repository }
+      rescue Hive::AgentGitGate::Error => e
+        raise Hive::WorktreeError, e.message
+      end
+
+      def validated_provider_head!(pr_number, metadata)
+        head = metadata.head_ref_oid.to_s.strip.downcase
+        unless head.match?(Hive::InternalPrCheckout::Identity::OID_PATTERN)
+          raise Hive::GhError, "PR ##{pr_number} metadata is missing a valid full head commit OID"
+        end
+        head
+      end
+
+      def ensure_no_preexisting_git_residue!(project_root, worktree_path:, branch:)
+        expanded = File.expand_path(worktree_path)
+        if File.exist?(expanded) || File.symlink?(expanded)
+          raise Hive::WorktreeError,
+                "unexplained preexisting worktree path #{expanded} blocks creation; inspect and clean up manually before retrying"
+        end
+        if worktree_listed?(project_root, expanded)
+          raise Hive::WorktreeError,
+                "unexplained preexisting registered worktree #{expanded} blocks creation; run `git -C #{project_root} worktree prune` after inspecting it"
+        end
+        if @gate.read(project_root, :branch_oid, branch: branch).success?
+          raise Hive::WorktreeError,
+                "unexplained preexisting branch #{branch} blocks creation; inspect and remove it before retrying"
+        end
+      end
+
+      def worktree_listed?(project_root, worktree_path)
+        res = @gate.read(project_root, :worktree_paths)
+        return false unless res.success?
+
+        expanded = File.expand_path(worktree_path)
+        res.stdout.each_line.any? do |line|
+          line.start_with?("worktree ") &&
+            File.expand_path(line.delete_prefix("worktree ").strip) == expanded
+        end
+      end
+
+      def build_staged_task_folder!(staging_dir:, slug:, project_name:, pr_number:, parsed_url:,
+                                    metadata:, head_oid:, worktree_path:, branch:, now:)
+        Dir.mkdir(staging_dir, 0o755)
+        Dir.mkdir(File.join(staging_dir, "reviews"), 0o700)
+
+        task_id = Hive::TaskCounter.next_or_nil
+        Hive::TaskMeta.write(
+          staging_dir,
+          id: task_id,
+          slug: slug,
+          display_name: "Ad-hoc review: PR ##{pr_number}",
+          workflow: Hive::Workflows::CODING_ID.to_s
+        )
+        write_idea_md(staging_dir, slug, pr_number, now)
+        write_task_md(staging_dir, slug, pr_number, metadata, now)
+        write_worktree_pointer(staging_dir, worktree_path, branch, metadata.base_ref_name, head_oid, now)
+        write_pr_md(staging_dir, pr_number, parsed_url.fetch("url"), metadata, head_oid)
+
         Hive::TaskJournal::Writer.new(
-          task_folder: task_folder, clock: -> { now }
+          task_folder: staging_dir, clock: -> { now }
         ).append(
           event_type: "legacy_baseline",
-          task: { "id" => task.id&.to_s, "slug" => task.slug },
-          workflow: task.workflow.id.to_s,
+          task: { "id" => task_id&.to_s, "slug" => slug },
+          workflow: Hive::Workflows::CODING_ID.to_s,
           stage: REVIEW_STAGE,
           attempt_id: Hive::TaskJournal::LEGACY_ATTEMPT_ID,
           task_generation: 0,
@@ -281,117 +519,243 @@ module Hive
           commit_generation: 0,
           reason: "ad_hoc_review_created",
           evidence: [ {
-            "type" => "commit", "sha" => materialized.fetch(:head_sha),
-            "branch" => materialized.fetch(:branch)
+            "type" => "commit", "sha" => head_oid, "branch" => branch
           } ],
           provenance: { "source" => "ad_hoc_review" },
           payload: {}
         )
+
+        Hive::InternalPrCheckout.initialize_new_task!(
+          task_folder: staging_dir,
+          task_id: task_id&.to_s,
+          task_slug: slug,
+          project: project_name,
+          pr_host: parsed_url.fetch("host"),
+          pr_repository: parsed_url.fetch("repository"),
+          pr_number: pr_number,
+          pr_url: parsed_url.fetch("url"),
+          base_ref_name: metadata.base_ref_name,
+          head_ref_name: metadata.head_ref_name,
+          head_repository: metadata.head_repository,
+          is_cross_repository: metadata.is_cross_repository == true,
+          pr_state: metadata.state,
+          branch: branch,
+          head_oid: head_oid,
+          clock: -> { now }
+        )
+        Hive::AtomicFile.fsync_directory(staging_dir)
       end
 
-      # Roll back a partially-created task after a create-phase failure — a
-      # verify_head! head-race (benign PR re-push between metadata fetch and
-      # materialize) or a sidecar write error would otherwise orphan the
-      # worktree at canonical_root/<slug> plus its `hive/review/pr-N` branch
-      # and `refs/hive/review/pr-N` ref, wedging the next `hive review --pr N`
-      # on "already exists in the worktree list". Guarded twice over:
-      #   * the whole body is wrapped so cleanup's OWN spawn/IO errors
-      #     (Errno::ENOENT from a missing git, Errno::EACCES from rm_rf) can
-      #     never mask the original create-phase error create_task! re-raises
-      #     immediately after — the "cannot mask the original failure"
-      #     guarantee now covers exceptions, not just non-zero git exits;
-      #   * after removal it checks for surviving residue (a stale
-      #     `git worktree list` entry or the branch ref) and warns, so a
-      #     partial cleanup failure is observable rather than silently
-      #     re-wedging the next run.
-      def cleanup_failed_task!(project_root, slug, pr_number, task_folder)
-        FileUtils.rm_rf(task_folder) if task_folder
-        remove_orphan_worktree!(project_root, slug, pr_number)
-        residue = cleanup_residue(project_root, slug, pr_number)
-        unless residue.empty?
-          warn "[hive.review] ad-hoc cleanup could not fully remove #{residue.join(' and ')} for #{slug}; " \
-               "run `git -C #{project_root} worktree prune` before retrying `hive review --pr #{pr_number}`"
+      def rollback_claimed_creation!(hive_state_path:, project_root:, worktree_root:, claim_path:, owner_token:)
+        Hive::Lock.with_commit_lock(hive_state_path) do
+          claim = read_claim(claim_path)
+          return unless claim && claim["owner_token"] == owner_token
+
+          rollback_owned_resources!(
+            project_root: project_root,
+            worktree_root: worktree_root,
+            claim: claim,
+            strict: false
+          )
+          remove_claim_file!(claim_path, expected_token: owner_token)
         end
       rescue StandardError => e
-        warn "[hive.review] ad-hoc cleanup after a failed create did not complete: " \
-             "#{e.class}: #{e.message} — run `git -C #{project_root} worktree prune` if a retry wedges"
+        warn "[hive.review] ad-hoc ownership-checked rollback did not complete: #{e.class}: #{e.message}"
+      ensure
+        deregister_in_process_claim(claim_path, owner_token)
       end
 
-      # Best-effort removal of any worktree + branch + fetch ref for this
-      # slug/PR. Exit codes are intentionally ignored: the common (clean) case
-      # has nothing to remove, so the proactive pre-materialize caller must not
-      # warn, and the cleanup caller surfaces a genuine partial failure via
-      # cleanup_residue instead.
-      def remove_orphan_worktree!(project_root, slug, pr_number)
-        worktree_path = worktree_path_for(project_root, slug)
-        branch = branch_for(pr_number)
-        Open3.capture3("git", "-C", project_root, "worktree", "remove", "--force", worktree_path)
-        Open3.capture3("git", "-C", project_root, "worktree", "prune")
-        Open3.capture3("git", "-C", project_root, "branch", "-D", branch)
-        Open3.capture3("git", "-C", project_root, "update-ref", "-d", "refs/#{branch}")
-        FileUtils.rm_rf(worktree_path)
-      end
+      def rollback_owned_resources!(project_root:, worktree_root:, claim:, strict:)
+        resources = claim["resources"].is_a?(Hash) ? claim["resources"] : {}
+        issues = []
 
-      # Artifacts that survived remove_orphan_worktree!: the stale
-      # `git worktree list` entry (the actual "already exists in the worktree
-      # list" wedge) and the `hive/review/pr-N` branch. Empty in the common
-      # case (nothing was created, or everything was removed), so the cleanup
-      # warning fires only on a genuine partial-cleanup failure.
-      def cleanup_residue(project_root, slug, pr_number)
-        residue = []
-        worktree_path = worktree_path_for(project_root, slug)
-        residue << "worktree #{worktree_path}" if worktree_listed?(project_root, worktree_path)
-        branch = branch_for(pr_number)
-        residue << "branch #{branch}" if Hive::Worktree.local_branch_ref_exists?(project_root, branch)
-        residue
-      end
-
-      def worktree_listed?(project_root, worktree_path)
-        out, _err, status = Open3.capture3("git", "-C", project_root, "worktree", "list", "--porcelain")
-        return false unless status.success?
-
-        expanded = File.expand_path(worktree_path)
-        out.each_line.any? do |line|
-          line.start_with?("worktree ") &&
-            File.expand_path(line.delete_prefix("worktree ").strip) == expanded
+        if (staging = resources["staging_dir"])
+          path = staging["path"].to_s
+          if !path.empty? && File.exist?(path) && !File.symlink?(path) &&
+             File.basename(path).end_with?(claim.fetch("owner_token"))
+            FileUtils.rm_rf(path)
+          end
         end
-      end
 
-      def verify_head!(pr_number, metadata, materialized)
-        expected = metadata.head_ref_oid.to_s
-        actual = materialized.fetch(:head_sha).to_s
-        if expected.empty?
-          warn "[hive.review] gh reported no head SHA for PR ##{pr_number}; " \
-               "skipping the worktree-matches-PR head check"
-          return
+        if (wt = resources["worktree"])
+          wt_path = wt["path"].to_s
+          expected_branch = wt["branch"].to_s
+          expected_oid = wt["oid"].to_s.downcase
+          if !wt_path.empty? && (File.exist?(wt_path) || worktree_listed?(project_root, wt_path))
+            if owned_worktree_matches?(project_root, wt_path, expected_branch: expected_branch, expected_oid: expected_oid)
+              @gate.remove_materialization(
+                repository_path: project_root,
+                destination: wt_path,
+                destination_root: worktree_root,
+                force: true
+              )
+            else
+              issues << "worktree #{wt_path} no longer matches claimed branch/OID"
+            end
+          end
         end
-        return if actual == expected
 
-        raise Hive::WorktreeError,
-              "PR ##{pr_number} materialized at #{actual}, but GitHub reported head #{expected}"
+        if (br = resources["branch"])
+          ref = br["ref"].to_s
+          expected_oid = br["oid"].to_s.downcase
+          if !ref.empty? && !expected_oid.empty?
+            begin
+              @gate.delete_ref_if_matches(
+                repository_path: project_root, ref: ref, expected_oid: expected_oid
+              )
+            rescue Hive::AgentGitGate::Error => e
+              issues << "branch #{ref} could not be removed safely (#{e.message})"
+            end
+          end
+        end
+
+        if (qr = resources["quarantine_ref"])
+          ref = qr["ref"].to_s
+          expected_oid = qr["oid"].to_s.downcase
+          if !ref.empty? && !expected_oid.empty?
+            begin
+              @gate.delete_ref_if_matches(
+                repository_path: project_root, ref: ref, expected_oid: expected_oid
+              )
+            rescue Hive::AgentGitGate::Error => e
+              issues << "quarantine ref #{ref} could not be removed safely (#{e.message})"
+            end
+          end
+        end
+
+        return true if issues.empty?
+
+        message = "ownership-checked cleanup left unexplained residue for #{claim['slug']}: #{issues.join('; ')}"
+        raise Hive::WorktreeError, message if strict
+
+        warn "[hive.review] #{message}"
+        false
       end
 
-      # Thread the VALIDATED parsed pr_number (the same value the slug, branch,
-      # and reuse check use) into every sidecar — never the gh-sourced
-      # metadata.number (which coerces an absent `number` to 0) — so the
-      # `…-pr-N` slug and the pr.md `pr_number` can't disagree and mis-fire
-      # reuse detection.
-      def write_sidecars(task_folder, slug, pr_number, metadata, materialized, now)
-        write_meta(task_folder, slug, pr_number)
-        write_idea_md(task_folder, slug, pr_number, now)
-        write_task_md(task_folder, slug, pr_number, metadata, now)
-        write_worktree_pointer(task_folder, materialized, now)
-        write_pr_md(task_folder, pr_number, metadata)
+      def owned_worktree_matches?(project_root, wt_path, expected_branch:, expected_oid:)
+        return false unless worktree_listed?(project_root, wt_path)
+        return true unless File.directory?(wt_path)
+
+        br = @gate.read(wt_path, :current_branch)
+        head = @gate.read(wt_path, :head_oid)
+        br.success? && br.stdout.strip == expected_branch &&
+          head.success? && head.stdout.strip.downcase == expected_oid
+      rescue Hive::AgentGitGate::Error
+        false
       end
 
-      def write_meta(task_folder, slug, pr_number)
-        Hive::TaskMeta.write(
-          task_folder,
-          id: Hive::TaskCounter.next_or_nil,
-          slug: slug,
-          display_name: "Ad-hoc review: PR ##{pr_number}",
-          workflow: Hive::Workflows::CODING_ID.to_s
+      def cleanup_quarantine_ref_safely(project_root, quarantine_ref:, expected_oid:)
+        @gate.delete_ref_if_matches(
+          repository_path: project_root, ref: quarantine_ref, expected_oid: expected_oid
         )
+      rescue Hive::AgentGitGate::Error => e
+        warn "[hive.review] ad-hoc quarantine ref cleanup warning: #{e.message}"
+      end
+
+      def persist_claim_if_owned!(hive_state_path, claim_path, updated_claim)
+        Hive::Lock.with_commit_lock(hive_state_path) do
+          current = read_claim(claim_path)
+          unless current && current["owner_token"] == updated_claim.fetch("owner_token")
+            raise Hive::ConcurrentRunError.new("creation claim ownership lost", lock_path: claim_path)
+          end
+          write_claim!(claim_path, updated_claim)
+        end
+        updated_claim
+      end
+
+      def record_claim_resource!(hive_state_path, claim_path, claim, key, metadata)
+        updated = claim.merge("resources" => claim.fetch("resources").merge(key => metadata))
+        persist_claim_if_owned!(hive_state_path, claim_path, updated)
+      end
+
+      def write_claim!(claim_path, claim)
+        dir = File.dirname(claim_path)
+        FileUtils.mkdir_p(dir, mode: 0o700) unless File.directory?(dir)
+        File.chmod(0o700, dir)
+        Hive::AtomicFile.write(claim_path, "#{JSON.pretty_generate(claim)}\n", mode: 0o600, fsync: true)
+        Hive::AtomicFile.fsync_directory(dir)
+      end
+
+      def read_claim(claim_path)
+        return nil unless File.exist?(claim_path) || File.symlink?(claim_path)
+
+        stat = File.lstat(claim_path)
+        unless stat.file? && !stat.symlink?
+          raise Hive::WorktreeError, "ad-hoc creation claim #{File.basename(claim_path)} is not a regular file"
+        end
+        raw = File.open(claim_path, File::RDONLY | File::NOFOLLOW) { |f| f.read(64 * 1024 + 1) || "" }
+        raise Hive::WorktreeError, "ad-hoc creation claim exceeds bounded size" if raw.bytesize > 64 * 1024
+
+        doc = JSON.parse(raw)
+        unless doc.is_a?(Hash) && doc["schema"] == CLAIM_SCHEMA && doc["schema_version"] == 1 &&
+               !doc["owner_token"].to_s.empty?
+          raise Hive::WorktreeError, "ad-hoc creation claim is malformed"
+        end
+        doc
+      rescue Errno::ENOENT
+        nil
+      rescue JSON::ParserError
+        raise Hive::WorktreeError, "ad-hoc creation claim contains invalid JSON"
+      end
+
+      def remove_claim_file!(claim_path, expected_token:)
+        current = read_claim(claim_path)
+        return unless current && current["owner_token"] == expected_token
+
+        File.unlink(claim_path)
+        Hive::AtomicFile.fsync_directory(File.dirname(claim_path))
+      rescue Errno::ENOENT
+        nil
+      end
+
+      def register_in_process_claim(claim_path, owner_token)
+        ACTIVE_CLAIMS_MUTEX.synchronize do
+          ACTIVE_CLAIMS[File.expand_path(claim_path)] = {
+            token: owner_token,
+            thread: Thread.current
+          }
+        end
+      end
+
+      def deregister_in_process_claim(claim_path, owner_token)
+        ACTIVE_CLAIMS_MUTEX.synchronize do
+          key = File.expand_path(claim_path)
+          ACTIVE_CLAIMS.delete(key) if ACTIVE_CLAIMS.dig(key, :token) == owner_token
+        end
+      end
+
+      def claim_owner_alive?(claim_path, claim)
+        pid = Integer(claim["pid"])
+        if pid == Process.pid
+          entry = ACTIVE_CLAIMS_MUTEX.synchronize { ACTIVE_CLAIMS[File.expand_path(claim_path)] }
+          return !!(entry && entry[:token] == claim["owner_token"] && entry[:thread].alive?)
+        end
+
+        Process.kill(0, pid)
+        live_start = Hive::Lock.process_start_time(pid)
+        recorded_start = claim["process_start_time"]
+        recorded_start.nil? || live_start.nil? || recorded_start == live_start
+      rescue Errno::ESRCH, RangeError, ArgumentError, TypeError
+        false
+      rescue Errno::EPERM
+        true
+      end
+
+      def allow_local_transport?(cfg)
+        return @allow_local_transport == true unless @allow_local_transport.nil?
+
+        cfg.is_a?(Hash) && cfg.dig("agent_git_gate", "allow_local_transport") == true
+      end
+
+      def network_timeout_sec(cfg)
+        raw = cfg.is_a?(Hash) && (cfg.dig("gh", "network_timeout_sec") ||
+                                  cfg.dig("agent_git_gate", "network_timeout_sec"))
+        val = raw ? Float(raw, exception: false) : nil
+        val&.positive? ? val : Hive::AgentGitGate::NETWORK_TIMEOUT_SEC
+      end
+
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       def write_idea_md(task_folder, slug, pr_number, now)
@@ -404,9 +768,7 @@ module Hive
             "source" => SOURCE,
             "original_text" => text
           },
-          <<~MD
-          #{text}
-        MD
+          "#{text}\n"
         )
       end
 
@@ -420,55 +782,58 @@ module Hive
             "pr_url" => metadata.url
           },
           <<~MD
-          # Ad-hoc review: PR ##{pr_number}
+            # Ad-hoc review: PR ##{pr_number}
 
-          This task runs the standard 6-review flow against #{metadata.url}.
-        MD
+            This task runs the standard 6-review flow against #{metadata.url}.
+          MD
         )
       end
 
-      def write_worktree_pointer(task_folder, materialized, now)
-        File.write(
-          File.join(task_folder, "worktree.yml"),
-          {
-            "path" => materialized.fetch(:path),
-            "branch" => materialized.fetch(:branch),
-            "created_at" => now.utc.iso8601,
-            "execute_base_head" => materialized.fetch(:head_sha)
-          }.to_yaml
-        )
+      def write_worktree_pointer(task_folder, worktree_path, branch, base_branch, head_oid, now)
+        data = {
+          "path" => worktree_path,
+          "branch" => branch,
+          "created_at" => now.utc.iso8601,
+          "execute_base_head" => head_oid
+        }
+        data["base_branch"] = base_branch if base_branch && !base_branch.to_s.empty?
+        Hive::AtomicFile.write(File.join(task_folder, "worktree.yml"), data.to_yaml, fsync: true)
       end
 
-      def write_pr_md(task_folder, pr_number, metadata)
+      def write_pr_md(task_folder, pr_number, pr_url, metadata, head_oid)
+        data = {
+          "pr_url" => pr_url,
+          "pr_number" => pr_number,
+          "source" => SOURCE,
+          "base_ref_name" => metadata.base_ref_name,
+          "head_oid" => head_oid,
+          "is_cross_repository" => metadata.is_cross_repository == true,
+          "state" => metadata.state
+        }
+        data["head_ref_name"] = metadata.head_ref_name if metadata.head_ref_name && !metadata.head_ref_name.to_s.empty?
+        data["head_repository"] = metadata.head_repository if metadata.head_repository && !metadata.head_repository.to_s.empty?
         write_frontmatter_md(
           File.join(task_folder, "pr.md"),
-          {
-            "pr_url" => metadata.url,
-            "pr_number" => pr_number,
-            "source" => SOURCE,
-            "base_ref_name" => metadata.base_ref_name,
-            "head_ref_oid" => metadata.head_ref_oid,
-            "is_cross_repository" => metadata.is_cross_repository,
-            "state" => metadata.state
-          },
+          data,
           <<~MD
-          ## Summary
-          Ad-hoc review for PR ##{pr_number}.
+            ## Summary
+            Ad-hoc review for PR ##{pr_number}.
 
-          ## Base
-          #{metadata.base_ref_name}
-        MD
+            ## Base
+            #{metadata.base_ref_name}
+          MD
         )
       end
 
       def write_frontmatter_md(path, data, body)
-        File.write(path, "#{data.to_yaml}---\n\n#{body}")
+        Hive::AtomicFile.write(path, "#{data.to_yaml}---\n\n#{body}", fsync: true)
       end
 
       def error_kind_for(error)
         case error
         when CollisionError then "destination_collision"
         when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::ConcurrentRunError then "busy"
         else "error"
         end
       end

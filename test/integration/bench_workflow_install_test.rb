@@ -59,6 +59,10 @@ class BenchWorkflowInstallTest < Minitest::Test
         )
         assert tracked_runtime_status.success?, tracked_runtime_err
         assert_includes tracked_runtime, "bench-runtime/harness/hive_run.rb"
+        %w[judge_process judge_process_worker].each do |helper|
+          assert_includes tracked_runtime.lines.map(&:chomp), "bench-runtime/harness/lib/#{helper}.rb"
+        end
+        assert_copied_judge_runs_standalone(runtime_root, project_root)
 
         folders = Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "benchmark-my-task-*")]
         assert_equal 1, folders.size
@@ -69,6 +73,57 @@ class BenchWorkflowInstallTest < Minitest::Test
         assert_equal :complete, Hive::Markers.current(task.state_file).name
       end
     end
+  end
+
+  def assert_copied_judge_runs_standalone(runtime, project)
+    bin = File.join(project, "fake-bin")
+    FileUtils.mkdir_p(bin)
+    fake = File.join(bin, "claude")
+    File.write(fake, "#!#{RbConfig.ruby}\n" + <<~'RUBY')
+      abort "Bundler leaked into judge" if %w[RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_SETUP BUNDLER_VERSION].any? { |key| ENV.key?(key) }
+      STDOUT.sync = true
+      puts '{"score":8,"reason":"installed"}'
+      if STDIN.read == "hang"
+        stop = File.open(ENV.fetch("STOP_FIFO"), File::RDONLY | File::NONBLOCK)
+        live = File.open(ENV.fetch("LIVE_FIFO"), File::WRONLY | File::NONBLOCK)
+        File.write(ENV.fetch("STARTED"), "ready")
+        IO.select([stop], nil, nil, 15)
+        exit!(live.closed? ? 1 : 0)
+      end
+    RUBY
+    File.chmod(0o755, fake)
+    stop_path = File.join(project, "stop")
+    live_path = File.join(project, "live")
+    [ stop_path, live_path ].each { |path| File.mkfifo(path, 0o600) }
+    stop_reader = File.open(stop_path, File::RDONLY | File::NONBLOCK)
+    stop_writer = File.open(stop_path, File::WRONLY | File::NONBLOCK)
+    live_reader = File.open(live_path, File::RDONLY | File::NONBLOCK)
+    clean_env = %w[RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_SETUP BUNDLER_VERSION].to_h { |name| [ name, nil ] }
+    env = clean_env.merge("PATH" => bin, "GEM_PATH" => bin, "GEM_HOME" => bin, "STOP_FIFO" => stop_path,
+                          "LIVE_FIFO" => live_path, "STARTED" => File.join(project, "hung-judge-started"))
+    script = <<~'RUBY'
+      begin
+        require "hive/version"
+        abort "Hive leaked into copied runtime lookup"
+      rescue LoadError => error
+        raise unless error.path == "hive/version"
+      end
+      require "lib/claude_judge"
+      verdict = HiveBench::ClaudeJudge.judge_fn.call(prompt: "score", seed: 0)
+      abort verdict.inspect unless verdict[:score] == 8
+      begin
+        HiveBench::ClaudeJudge.judge_fn(timeout_s: 0.7).call(prompt: "hang", seed: 1)
+        abort "accepted a partial score"
+      rescue HiveBench::ClaudeJudge::Error => error
+        abort error.message unless error.message.include?("timed out after 0.7s")
+      end
+    RUBY
+    out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{File.join(runtime, 'harness')}", "-e", script, chdir: project)
+    assert status.success?, out + err
+    assert_path_exists env.fetch("STARTED")
+    assert_nil live_reader.read_nonblock(1, exception: false)
+  ensure
+    [ stop_writer, stop_reader, live_reader ].compact.each(&:close)
   end
 
   def test_explicit_refresh_and_isolated_commit_revert_preserve_unrelated_state

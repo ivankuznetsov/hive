@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/task_workspace/builder.rb
 created: 2026-04-26
-updated: 2026-11-03
+updated: 2026-11-28
 tags: [module, workflow, result, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
 ---
 
@@ -452,3 +452,37 @@ legacy gates require fresh gating. Deliberation filters on admitted eligible
 judges and summarizes only current eligible generations. See
 `docs/bench-result-contract.md` and `docs/bench-runtime-inventory.md` for
 populations, merge order and delivery.
+
+## Host CLI judge supervision
+
+The packaged Claude and Codex adapters use `HiveBench::JudgeProcess` to run
+the host CLI without GNU `timeout`. Claude defaults to 1,200 seconds and Codex
+to 3,600. Each call accepts fractional seconds or a duration with an
+`s`, `m`, `h` or `d` suffix. Zero disables the invocation deadline.
+The monotonic clock covers prompt delivery, judge exit and EOF on both output
+streams. A deadline discards any score or quota banner captured so far. Exit
+124 from the CLI follows the ordinary failed-judge path.
+
+A small Ruby child leads the judge's process group and reports the judge's
+exit status. On timely completion the harness releases and reaps that child.
+A same-group helper that closed its output may finish in the background.
+On timeout or interruption the harness sends TERM, allows five seconds for
+graceful exit, then sends KILL while it still owns the unreaped group leader.
+It allows one more second to drain and reap. This bounds foreground return at
+the deadline plus six seconds, subject to OS scheduling. Diagnostics record
+signal delivery, stream EOF and custody reaping separately. Descendant
+termination remains unconfirmed even when all three observations succeed.
+Descendants that leave the group are outside its signalling scope.
+
+Loss of the harness control pipe starts cleanup in the custody process, even
+when the invocation deadline is disabled. The earliest cleanup deadline wins
+if the harness dies partway through the grace period. For a stalled harness
+with an open control pipe, custody starts its own cleanup six seconds after
+the invocation deadline and escalates by eleven seconds after that deadline,
+subject to scheduling.
+
+Existing campaigns use their pinned runtime until an operator runs
+`hive init . --workflow bench` in the project. Generate and judge park with
+that refresh instruction when the snapshot lacks supervisor version 1 and
+the host judge PATH lacks `timeout`. Older snapshots can continue using an
+available `timeout` executable.

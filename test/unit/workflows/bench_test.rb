@@ -81,6 +81,8 @@ class WorkflowsBenchTest < Minitest::Test
     assert_path_exists File.join(runtime, "harness", "hive_run.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "campaign_contract.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "judge_slate.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "judge_process.rb")
+    assert_path_exists File.join(runtime, "harness", "lib", "judge_process_worker.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "controller_git.sh")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_runtime.rb")
     assert_path_exists File.join(runtime, "harness", "lib", "opencode_bench_launcher.sh")
@@ -1032,6 +1034,59 @@ class WorkflowsBenchTest < Minitest::Test
       assert_includes body, "predates automatic judge retries"
       assert_includes body, "hive init . --workflow bench"
       assert_equal :waiting, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_generate_and_judge_gate_stale_runtime_only_when_host_timeout_is_absent
+    Dir.mktmpdir("bench-runtime-preflight") do |root|
+      harness = File.join(root, ".hive-state", "bench-runtime", "harness")
+      lib = File.join(harness, "lib")
+      bin = File.join(root, "bin")
+      FileUtils.mkdir_p([ lib, bin ])
+      File.symlink(RbConfig.ruby, File.join(bin, "ruby"))
+      File.symlink("/bin/rm", File.join(bin, "rm"))
+      # This snapshot already supports the independent retry and routing guards.
+      File.write(File.join(harness, "rejudge.rb"), <<~RUBY)
+        module HiveBench
+          module Rejudge; FAILURE_EVENT_VERSION = 1; end
+          module Deliberation; FAILURE_EVENT_VERSION = 1; end
+          module CodexJudge; PROVIDER_ROUTE_VERSION = 1; end
+          module CampaignContract; VERSION = 1; end
+        end
+        File.write("launched", "judge") if __FILE__ == $PROGRAM_NAME
+      RUBY
+      File.write(File.join(harness, "hive_run.rb"), 'File.write("launched", "generate")')
+      %w[deliberation campaign_contract].each { |name| File.write(File.join(lib, "#{name}.rb"), "") }
+      helper = File.join(lib, "judge_process.rb")
+
+      %w[generate judge].each do |stage|
+        task = File.join(root, ".hive-state", "stages", stage, "fixture")
+        FileUtils.mkdir_p(task)
+        instruction = File.read(stages_by_name.fetch(stage).instruction)
+        script = instruction.match(/<!-- bench-stage-script -->\n```bash\n(.*?)\n```/m)[1]
+        %i[absent unversioned current].product([ false, true ]).each do |version, has_timeout|
+          FileUtils.rm_f(helper)
+          File.write(helper, "module HiveBench; class JudgeProcess; end; end") if version == :unversioned
+          FileUtils.cp(File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness/lib/judge_process.rb"), helper) if version == :current
+          timeout = File.join(bin, "timeout")
+          FileUtils.rm_f(timeout)
+          File.symlink("/bin/false", timeout) if has_timeout
+          state = File.join(task, "#{stage}.md")
+          File.write(state, "")
+          out, err, status = Open3.capture3({ "PATH" => bin }, "/bin/bash", "-c", script, chdir: task)
+          assert status.success?, out + err
+          assert_empty err
+          assert_equal :waiting, Hive::Markers.current(state).name
+          message = File.read(state)
+          if version != :current && !has_timeout
+            assert_includes message, "host PATH has no timeout"
+            assert_includes message, "hive init . --workflow bench"
+          else
+            assert_includes message, "Missing campaign.yml", "expected to reach the next preflight"
+          end
+          refute_path_exists File.join(task, "launched")
+        end
+      end
     end
   end
 

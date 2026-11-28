@@ -788,12 +788,23 @@ generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
 
 Fan-in uses the same immutable admission context as every other scheduler
 decision. Daemon rows retain scalar-or-array `depends_on`, the complete ordered
-`unmet_dependencies` set with each edge's `required_gate`, and
-`dependency_base_mode`; list rows deliberately keep `blocked_by` and
-`dependency_stage` null. A list stays held until every prerequisite reaches
-`9-done`, even when project `dependency_gate_stage` is `8-finalize`, and no
-force flag or cached earlier verdict can release it. The coherent operational
-snapshot/status-cache format is v2 so these fields survive the fast path.
+`unmet_dependencies` set with each edge's `required_gate`,
+`dependency_base_mode`, and optional `dependency_repair_roots` (preserved
+through `StatusConsumer` and `OperationalSnapshot` while retaining the
+exact-key `extract_admission_error` check so additive root evidence never
+degrades into `dependency_validation_failed`). Descendants whose only upstream
+errors are covered plan defects have `admission_error: null`, classify as
+`:blocked_on_dependency` / `waiting_external`, and never trigger local repair
+or `admission_error` holds; local roots keep `:admission_error` /
+`waiting_operator`. When a planner exhausts its single bounded dependency
+correction, `Policy.decide` returns `:skip` with operator ownership ahead of
+generic admission dispatch classification so mtime changes, polls, and restarts
+never auto-dispatch another planner attempt. List rows deliberately keep
+`blocked_by` and `dependency_stage` null. A list stays held until every
+prerequisite reaches `9-done`, even when project `dependency_gate_stage` is
+`8-finalize`, and no force flag or cached earlier verdict can release it. The
+coherent operational snapshot/status-cache format is v2 so these fields survive
+the fast path.
 The compact one-shot contract is intentionally narrower: dependency pending
 items and wake conditions carry `dependency` plus a `dependencies` array of
 task-name strings for fan-in. They do not copy the status surface's structured

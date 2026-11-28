@@ -749,8 +749,22 @@ is waiting on a transitive prerequisite, both singular fields are null and the
 transitive blockers remain available through `unmet_dependencies`.
 
 Text/TUI render all benign blockers from `unmet_dependencies`; scalar rows keep
-the familiar `⏸ blocked by <task> (<stage>)` form. Admission errors render the
-stable reason and safe correction ahead of ordinary waits and are never
+the familiar `⏸ blocked by <task> (<stage>)` form. When a task inherits one or
+more covered upstream plan defects, `hive-status.v9`, `hive-operational-status.v5`,
+`hive-stack.v1`, and `hive-task-workspace.v2` carry an optional additive
+`dependency_repair_roots` array (omitted when empty) without altering closed
+`AdmissionError`, `UnmetDependency`, or `REASON_CODES` definitions. Descendants
+whose only errors are inherited covered plan defects classify as ordinary waits
+(`blocked_on_dependency` / `waiting_external`, `admission_error: null`) and
+render `blocked by <project:root1>: invalid depends_on <values>; ...` with
+remaining unmet siblings shown separately and without repeating the root.
+Detail views (`hive task`, TUI red-status detail, web task dependencies) show
+per-index values, individual suggestions, and the root repair command
+(`hive plan <root-slug> --project <project> --from 3-plan`). An independently
+broken descendant keeps its own `admission_error` while also displaying
+inherited roots. Fresh reads after repairing the root remove obsolete
+`dependency_repair_roots` without mutating descendants. Admission errors render
+the stable reason and safe correction ahead of ordinary waits and are never
 described as waiting on an in-flight task. An unexpected validator exception
 becomes `dependency_validation_failed`, never an unblocked row.
 

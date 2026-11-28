@@ -184,6 +184,24 @@ class PlanReviewPlannerRevisionTest < Minitest::Test
         assert_includes result.fetch("diagnostic"), "protected artifacts"
       end
 
+      correction_path = Hive::PlanDependencyCorrection.path(root)
+      File.write(correction_path, "{\"schema\":\"hive-plan-dependency-correction\"}\n")
+      tamper_correction = lambda do |_task, agent_custody:, **kwargs|
+        agent_custody.call do
+          File.write(correction_path, "{\"exhausted\":false}\n")
+          File.write(kwargs.fetch(:expected_output), "# Candidate\n<!-- COMPLETE -->\n")
+          { status: :ok, usage: { model: "served-model" } }
+        end
+      end
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, tamper_correction) do
+        result = runner.call(
+          prompt: "revise", workspace:, output_path: output,
+          planner_identity:, timeout_sec: 60
+        )
+        assert_equal "terminal_failure", result.fetch("status")
+        assert_includes result.fetch("diagnostic"), "plan-dependency-correction"
+      end
+
       FileUtils.rm_f(output)
       missing = lambda do |_task, agent_custody:, **|
         agent_custody.call { { status: :failed, error_message: "no candidate" } }

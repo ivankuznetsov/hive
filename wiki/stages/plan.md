@@ -71,27 +71,62 @@ plan-only, mismatched, malformed, or cyclic declaration becomes an admission
 error at status/run/forward-approve. Hive does not inspect plan prose for
 ordering, and the planner must not edit `meta.yml`.
 
-`Hive::PlanDependencyAdoption.adopt!` copies the plan's declaration into
-`meta.yml` when doing so can only add dependencies: metadata has no
-`depends_on`, or the plan's declaration is a strict superset of it. References
-are compared by target using admission's project rule
+`Hive::PlanDependencyAdoption.adopt!` validates and copies the plan's
+declaration into `meta.yml` when doing so can only add dependencies: metadata
+has no `depends_on`, or the plan's declaration is a strict superset of it
+(preserving the shipped scalar-or-list grammar and additive strict-superset
+adoption from hive#1573, superseding earlier scalar-only brainstorm notes).
+References are compared by target using admission's project rule
 (`Dependencies.reference_identity`), so `app:slug` and a bare `slug` in project
 `app` are one edge while `web:slug` is not. A plan that omits, replaces,
 re-spells, or reorders an existing metadata dependency is never adopted, so
 `plan_dependency_mismatch` still stops for a human; a declaration naming the
 task itself is never adopted. A scalar edge that grows into a list moves the
-task to list policy (`9-done`, project-default base). Admission still resolves
-every adopted target and reports `dependency_cycle` or invalid references.
+task to list policy (`9-done`, project-default base), and exact duplicates are
+deduplicated without collapsing a list to a scalar. Both `templates/plan_prompt.md.erb`
+and `templates/plan_revision_prompt.md.erb` require full task slugs and forbid
+task-code shorthand (such as `F2`, `F3`, `C4`).
+
+Before adopting or entering plan review, `Stages::Plan` runs the shared
+read-only validator (`PlanDependencyAdoption.validate`) against an immutable
+admission context built outside the task mutation lock:
+
+- Every proposed target must resolve before canonical bytes or `meta.yml` are
+  mutated; no unresolved reference is ever adopted. Environmental resolution
+  errors (such as cross-project enrollment/repository-identity failures),
+  duplicate-task ambiguity, cancelled/superseded targets, cycles, and ordinary
+  below-gate waits retain admission handling and never spend a planner
+  correction.
+- On a covered planner defect (malformed YAML/unsupported shapes, task-code
+  shorthand, same-project targets with zero matches in active-plus-archived
+  context, or unadoptable plan/metadata mismatch), Hive persists controller-owned
+  correction custody (`plan-dependency-correction.json`) before spawning
+  **exactly one** automatic correction attempt per invocation, passing every
+  offending indexed value, structured diagnostic, safe correction, and unique
+  active-plus-archived slug/idempotency hint into the second prompt.
+- On a second invalid output, Hive marks `exhausted: true` in
+  `plan-dependency-correction.json`, records the diagnostic, and stamps `ERROR`
+  on `plan.md` (no further automatic retries on polls, restarts, or mtime
+  changes).
+- A previously cleared plan whose current bytes are now invalid enters a
+  distinct validation branch that records the diagnostic and returns an error
+  with zero planner spawns and without mutating historical clearance records.
+- Explicit operator root repair —
+  `hive plan <root-slug> --project <project> --from 3-plan` — carries explicit
+  local-repair intent from `StageAction` through `Run#run_task` to
+  `Stages::Plan` (never granted to automated daemon dispatches). Under the task
+  lock it permits repairing only that task's covered local plan defect even
+  while invalid bytes remain in `plan.md`, starting one fresh bounded
+  invocation with at most one automatic correction while keeping unrelated
+  metadata/environment/cycle errors and inherited prerequisite waits enforced.
 
 Adoption runs wherever `plan.md` is written: after the initial planner spawn
-for a complete plan, and when plan review promotes a revised candidate into
-`plan.md` at clearance (before the resolution is published). The second site
-closes the hivedev 2026-10-30 failures where a revision introduced or extended
-the dependency after the first adoption point. Both use the task observation
-the run captured; a missing task, same-path replacement, or deletion between
-metadata read and persistence produces a concise stale-task diagnostic and
-leaves dependency admission active. Metadata corruption and write failures use
-a distinct diagnostic; unexpected programming failures still propagate.
+and validation, and inside `PlanReview::Orchestrator`'s single guarded
+clearance boundary when promoting a revised candidate or publishing `skipped`,
+`cleared`, or `degraded_cleared`. Both validate against an immutable context
+built outside the mutation section and recheck local digests and lookup
+observations under custody; stale observations trigger a bounded retry without
+a planner spawn, and metadata/write failures retain explicit diagnostics.
 
 If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 

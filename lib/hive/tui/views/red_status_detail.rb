@@ -67,6 +67,7 @@ module Hive
           body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
           body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
+          repair_root_lines(row, inner_width).each { |line| body_lines << line }
           publication = Hive::ReviewPublicationRecovery.project(row.attrs || {}, marker: row.marker,
             action: Hive::OperationalAction.descriptor(project: row.project_name,
               row: row.to_h.transform_keys(&:to_s).merge("action" => row.action_key.to_s)))
@@ -234,10 +235,39 @@ module Hive
         def summary_text(row)
           diagnostic = row.diagnostic || {}
           summary = safe(diagnostic["summary"]).strip
-          return missing_summary_fallback if summary.empty?
-          return missing_summary_fallback if summary.match?(MARKER_SUMMARY_PATTERN)
+          if summary.empty? || summary.match?(MARKER_SUMMARY_PATTERN)
+            admission = row.respond_to?(:admission_error) ? row.admission_error : nil
+            if admission.is_a?(Hash) && !admission["safe_correction"].to_s.strip.empty?
+              return safe("#{admission['reason_code']}: #{admission['safe_correction']}")
+            end
+            return missing_summary_fallback
+          end
 
           summary
+        end
+
+        def repair_root_lines(row, inner_width)
+          roots = row.respond_to?(:dependency_repair_roots) ? Array(row.dependency_repair_roots) : []
+          return [] if roots.empty?
+
+          lines = [ "", Styles::HEADER.render(truncate("Dependency repair roots", inner_width)) ]
+          roots.each do |root|
+            next unless root.is_a?(Hash)
+
+            header = Hive::Dependencies.repair_root_summary(root)
+            lines.concat(wrapped("  • #{safe(header)}", inner_width))
+            Array(root["issues"]).each do |issue|
+              next unless issue.is_a?(Hash)
+
+              idx = issue["index"].nil? ? "declaration" : "index #{issue['index']}"
+              hint = issue["suggestion"] ? " (suggestion: #{safe(issue['suggestion'])})" : ""
+              lines.concat(wrapped("      [#{idx}] #{safe(issue['display_value'])}: #{safe(issue['message'])}#{hint}", inner_width))
+            end
+            unless root["safe_correction"].to_s.strip.empty?
+              lines.concat(wrapped("      Repair: #{safe(root['safe_correction'])}", inner_width))
+            end
+          end
+          lines
         end
 
         def identity_label(row)

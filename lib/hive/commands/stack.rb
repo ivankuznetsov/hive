@@ -260,7 +260,10 @@ module Hive
             "state" => verdict_state(verdict),
             "unmet_dependencies" => verdict.unmet_dependencies.map(&:to_h),
             "admission_error" => verdict.admission_error&.to_h
-          },
+          }.tap do |dep|
+            roots = verdict.dependency_repair_roots.first(64).map(&:to_h)
+            dep["dependency_repair_roots"] = roots unless roots.empty?
+          end,
           "notes" => notes(task, project, outcome)
         }
       end
@@ -314,8 +317,19 @@ module Hive
 
         puts headline(task, payload)
         dependency = payload.fetch("dependency")
+        repair_roots = Array(dependency["dependency_repair_roots"])
+        repair_roots.each do |root|
+          puts "  waiting for repair at #{Hive::Dependencies.repair_root_summary(root)}"
+        end
         dependency.fetch("unmet_dependencies").each do |unmet|
-          puts "  waiting for #{unmet['blocked_by'] || unmet['reference']} " \
+          target = unmet["blocked_by"] || unmet["reference"]
+          next if repair_roots.any? do |root|
+            Hive::Dependencies.repair_root_matches_target?(
+              root, target, current_project: payload["project"]
+            )
+          end
+
+          puts "  waiting for #{target} " \
                "(#{unmet['dependency_stage'] || 'stage unknown'}) to reach #{unmet['required_gate']}"
         end
         if payload["depends_on"] && dependency.fetch("state") == "clear"

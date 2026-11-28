@@ -232,8 +232,15 @@ Command-level error serialization deliberately propagates
 
 Dependency errors also carry `reason_code`, `offending_ref`, and
 `safe_correction`. `dependency_wait` is retryable after the prerequisite
-reaches its gate; `admission_error` requires repairing the named metadata,
-plan, workflow, enrollment, or repository-identity evidence.
+reaches its gate (including descendants waiting on an upstream root task's
+covered plan defect); `admission_error` requires repairing the named metadata,
+plan, workflow, enrollment, or repository-identity evidence. Explicit operator
+`hive plan <root-slug> --project <project> --from 3-plan` carries local
+plan-repair intent into `Run#run_task` and `Stages::Plan` so an operator can
+replan a root task whose `plan.md` still contains invalid `depends_on` bytes
+with one fresh bounded invocation (at most one automatic correction). Automated
+daemon dispatches (`HIVE_DAEMON_AUTOMATED_DISPATCH=1`) never receive that
+intent, and descendants or forward transitions still fail admission closed.
 
 In JSON mode, the inner Approve and Run are quieted so the envelope is a single parseable document. In text mode, Approve and Run emit their normal prose since that output is intended for humans.
 

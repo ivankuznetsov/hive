@@ -1,3 +1,4 @@
+require "digest"
 require "fileutils"
 require "securerandom"
 require "time"
@@ -77,6 +78,18 @@ module Hive
 
     def path(task_folder)
       File.join(task_folder, FILENAME)
+    end
+
+    def file_digest(task_folder)
+      meta_path = path(task_folder)
+      stat = File.lstat(meta_path)
+      return :invalid if stat.symlink? || !stat.file?
+
+      Digest::SHA256.file(meta_path).hexdigest
+    rescue Errno::ENOENT
+      nil
+    rescue SystemCallError, IOError
+      :invalid
     end
 
     # Retains a handle to the original directory so callers can distinguish a

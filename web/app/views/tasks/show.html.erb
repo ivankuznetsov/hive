@@ -111,7 +111,9 @@
       <%= render "tasks/supporting_artifacts", result: @semantic_workspace.fetch("result") %>
     <% end %>
 
-    <% if @task["depends_on"].present? || Array(@workspace.dig("panels", "dependencies", "edges")).any? %>
+    <% if @task["depends_on"].present? || @task["admission_error"].present? ||
+          Array(@task["dependency_repair_roots"]).any? ||
+          Array(@workspace.dig("panels", "dependencies", "edges")).any? %>
       <%= render "tasks/dependencies", workspace: @workspace %>
     <% end %>
 

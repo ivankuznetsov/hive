@@ -225,6 +225,70 @@ class DependenciesTest < Minitest::Test
     assert_includes err, "unrecognized task shape"
   end
 
+  def test_inspect_declaration_preserves_all_bad_elements_and_valid_siblings_with_indexes
+    inspection = Hive::Dependencies.inspect_declaration([ "C4", "valid-task", "F2", "F3", [ "nested" ] ])
+
+    refute inspection.valid?
+    assert inspection.list?
+    assert_nil inspection.parsed
+    assert_equal [ [ 1, "valid-task" ] ],
+                 inspection.entries.map { |entry| [ entry.index, entry.reference.to_s ] }
+    assert_equal [ 0, 2, 3, 4 ], inspection.issues.map(&:index)
+    assert_equal [ "C4", "F2", "F3", [ "nested" ] ], inspection.issues.map(&:raw_value)
+    assert_equal %i[task_code_shorthand task_code_shorthand task_code_shorthand nested_element],
+                 inspection.issues.map(&:code)
+    assert_equal 'invalid depends_on C4, F2, F3, ["nested"]',
+                 Hive::Dependencies.format_invalid_depends_on(inspection.issues)
+    assert_equal "invalid depends_on F2, F3",
+                 Hive::Dependencies.format_invalid_depends_on(inspection.issues[1..2])
+
+    serialized = JSON.parse(JSON.generate(inspection.issues.map(&:to_h)))
+    assert_equal 4, serialized.length
+    assert_equal({
+      "index" => 2, "raw_value" => "F2", "display_value" => "F2",
+      "code" => "task_code_shorthand",
+      "message" => "depends_on element 3 is invalid: depends_on must be a task slug, numeric id, or project:slug",
+      "suggestion" => nil
+    }, serialized[1])
+  end
+
+  def test_inspect_declaration_handles_empty_mapping_and_non_finite_floats_safely
+    empty = Hive::Dependencies.inspect_declaration([])
+    mapping = Hive::Dependencies.inspect_declaration({ "task" => "a" })
+    nan_list = Hive::Dependencies.inspect_declaration([ "base-task", Float::NAN ])
+
+    assert_equal [ :empty_list ], empty.issues.map(&:code)
+    assert_equal "[]", empty.issues.first.display_value
+    assert_equal [ :invalid_shape ], mapping.issues.map(&:code)
+    assert_equal '{"task":"a"}', mapping.issues.first.display_value
+    assert_equal [ 1 ], nan_list.issues.map(&:index)
+    assert_equal "NaN", nan_list.issues.first.raw_value
+    assert_match(/\A\[/, JSON.generate(nan_list.issues.map(&:to_h)))
+  end
+
+  def test_hint_matching_rules_enforce_strict_idempotency_key_and_slug_prefix_boundaries
+    assert Hive::Dependencies.slug_prefix_matches?("f2-build-workspace-260923-d691", code: "F2")
+    assert Hive::Dependencies.slug_prefix_matches?("c4", code: "C4")
+    refute Hive::Dependencies.slug_prefix_matches?("f20-other-task", code: "F2")
+
+    assert Hive::Dependencies.idempotency_key_matches?("app:f2:v1", project: "app", code: "F2")
+    assert Hive::Dependencies.idempotency_key_matches?("app:F2:2026-10-30", project: "app", code: "f2")
+    refute Hive::Dependencies.idempotency_key_matches?("other:f2:v1", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?("APP:f2:v1", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?("app:f2", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?("app:f2:v1:extra", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?("app::v1", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?(":f2:v1", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?("app:f2:", project: "app", code: "F2")
+    refute Hive::Dependencies.idempotency_key_matches?("free-form-key", project: "app", code: "F2")
+
+    assert_equal "F2", Hive::Dependencies.hint_code_for("F2", current_project: "app")
+    assert_equal "F2", Hive::Dependencies.hint_code_for("app:F2", current_project: "app")
+    assert_nil Hive::Dependencies.hint_code_for("other:F2", current_project: "app")
+    assert_nil Hive::Dependencies.hint_code_for("42", current_project: "app")
+    assert_nil Hive::Dependencies.hint_code_for("a:b:c", current_project: "app")
+  end
+
   private
 
   def task(slug, id: nil, stage_index: nil, stage: nil)

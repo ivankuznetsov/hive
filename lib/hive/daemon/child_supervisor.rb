@@ -252,6 +252,7 @@ module Hive
 
         pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
           *Hive::CliArgvPolicy.local_child_argv(argv), role: argv[1] || "daemon-child",
+          env: { "HIVE_DAEMON_AUTOMATED_DISPATCH" => "1" },
           pgroup: true, out: log_io, err: log_io, close_others: true
         )
         log_io.close

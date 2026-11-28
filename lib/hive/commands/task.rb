@@ -145,7 +145,22 @@ module Hive
 
       def render(document)
         puts document.dig("headline", "label")
+        explanation = document.dig("headline", "explanation").to_s
+        puts "Details: #{explanation}" unless explanation.empty? || explanation == "Canonical workflow status is current."
         puts "Action: #{document.dig('action', 'label') || 'None'}"
+        repair_roots = Array(document.dig("diagnostic", "dependency_repair_roots"))
+        unless repair_roots.empty?
+          puts "Dependency repair roots:"
+          repair_roots.each do |root|
+            puts "  - #{Hive::Dependencies.repair_root_summary(root)}"
+            Array(root["issues"]).each do |issue|
+              idx = issue["index"].nil? ? "declaration" : "index #{issue['index']}"
+              hint = issue["suggestion"] ? " (suggestion: #{issue['suggestion']})" : ""
+              puts "      [#{idx}] #{issue['display_value']}: #{issue['message']}#{hint}"
+            end
+            puts "      Repair: #{root['safe_correction']}" unless root["safe_correction"].to_s.empty?
+          end
+        end
         primary = document.dig("result", "primary", "reference")
         puts "Primary result: #{primary || 'Not available'}"
         puts "Usage: #{document.dig('usage', 'coverage')}"

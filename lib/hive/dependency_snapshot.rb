@@ -29,6 +29,8 @@ module Hive
     ActiveProjectInput = Data.define(:task_folders)
     BaseSelection = Data.define(:branch, :mode)
     BranchRefInventory = Data.define(:needed, :refs)
+    LookupSignature = Data.define(:roots, :digest)
+    PlanValidationContext = Data.define(:context, :project_name, :lookup_signature, :enrollment_error)
 
     # Terminal (archive) stage of a delivered prerequisite — the same fixed
     # gate list edges use, derived from the coding descriptor. Its branch has
@@ -54,6 +56,9 @@ module Hive
                 "workflow_stages" => task.workflow_stages,
                 "metadata_status" => task.metadata_status,
                 "plan_status" => task.plan_status,
+                "plan_dependency" => task.plan_dependency,
+                "plan_raw_depends_on" => task.plan_raw_depends_on,
+                "plan_issues" => Array(task.plan_issues).map(&:to_h),
                 "validation_error" => task.validation_error.to_s,
                 "cancelled" => task.cancelled,
                 "superseded_by" => task.superseded_by
@@ -253,7 +258,11 @@ module Hive
 
         project.with(live_repository_identity: Hive::RepositoryIdentity.current(project.path))
       end
-      Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback_context)
+      Hive::DependencyAdmission::Context.new(
+        projects: projects,
+        fallback: fallback_context,
+        hint_provider: hint_provider(registry_entries)
+      )
     end
 
     def proposed_task_verdict(project:, slug:, depends_on:, workflow:, folder:,
@@ -361,7 +370,8 @@ module Hive
     # This is the dependency counterpart to Status's partial exact-task
     # projection used by bounded watchers.
     def targeted_admission_context(registry_entries, targets:, workflow_generations: nil,
-                                   overlays: nil, dependency_overrides: nil)
+                                   overlays: nil, dependency_overrides: nil,
+                                   extra_references: nil)
       entries = Array(registry_entries)
       project_configs = {}
       projects = entries.map do |entry|
@@ -395,14 +405,17 @@ module Hive
       end
       admission_context_with_fallback(
         entries, projects, workflow_generations: workflow_generations,
-        project_configs: project_configs
+        project_configs: project_configs,
+        extra_references: extra_references
       )
     end
 
-    def admission_context_with_fallback(entries, projects, workflow_generations: nil, project_configs: nil)
+    def admission_context_with_fallback(entries, projects, workflow_generations: nil,
+                                        project_configs: nil, extra_references: nil)
       fallback_tasks, scan_errors = dependency_fallback_tasks(
         entries, projects, workflow_generations: workflow_generations,
-        project_configs: project_configs
+        project_configs: project_configs,
+        extra_references: extra_references
       )
       projects = projects.map do |project|
         if (loaded_config = project_configs&.[](project.path))
@@ -419,20 +432,210 @@ module Hive
       fallback_projects = projects.map do |project|
         project.with(tasks: fallback_tasks.fetch(project.name, []))
       end
-      identity_targets = cross_project_identity_targets(projects + fallback_projects)
+      identity_targets = cross_project_identity_targets(
+        projects + fallback_projects, extra_references: extra_references
+      )
       projects = projects.map do |project|
         next project unless identity_targets.include?(project.name)
 
         project.with(live_repository_identity: Hive::RepositoryIdentity.current(project.path))
       end
       fallback = Hive::DependencyAdmission::Context.new(projects: fallback_projects)
-      Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback)
+      Hive::DependencyAdmission::Context.new(
+        projects: projects, fallback: fallback,
+        hint_provider: hint_provider(entries)
+      )
+    end
+
+    # Build an immutable admission context and local lookup-observation
+    # signature outside any task mutation critical section. Live repository
+    # identity probes run here so callers never spawn git while holding a
+    # clearance or adoption mutation lock.
+    def plan_validation_context(task, plan_read: nil, registry_entries: Hive::Config.registered_projects)
+      entries = Array(registry_entries)
+      root = File.expand_path(task.project_root)
+      matches = entries.select do |entry|
+        File.expand_path(entry.fetch("path")) == root
+      end
+      unless matches.one?
+        return PlanValidationContext.new(
+          context: nil,
+          project_name: nil,
+          lookup_signature: nil,
+          enrollment_error: Hive::DependencyAdmission::AdmissionError.new(
+            reason_code: "dependency_validation_failed",
+            offending_ref: "#{task.project_name}:#{task.slug}",
+            safe_correction: "Inspect project enrollment and re-enroll the intended project before validating dependencies."
+          ).freeze
+        ).freeze
+      end
+
+      project_name = matches.first.fetch("name")
+      extra_references = Array(plan_read&.entries).map do |entry|
+        [ project_name, entry.reference ]
+      end
+      touched_projects = [ project_name ] + extra_references.map do |source_project, reference|
+        Hive::Dependencies.reference_project(reference, source_project)
+      end
+      touched_roots = entries.each_with_object([]) do |entry, roots|
+        next unless touched_projects.include?(entry["name"].to_s)
+
+        roots << File.expand_path(entry.fetch("path"))
+      end.uniq.sort
+
+      signature = capture_lookup_signature(touched_roots)
+      generations = capture_workflow_generations(entries)
+      context = targeted_admission_context(
+        entries,
+        targets: { project_name => [ task.slug ] },
+        workflow_generations: generations,
+        extra_references: extra_references
+      )
+      PlanValidationContext.new(
+        context: context,
+        project_name: project_name,
+        lookup_signature: signature,
+        enrollment_error: nil
+      ).freeze
+    end
+
+    # Lightweight local filesystem observation of stage directories and task
+    # metadata identities. Never invokes git or live repository probes, so it
+    # is safe to recheck under a mutation lock.
+    def capture_lookup_signature(roots)
+      normalized = Array(roots).map { |path| File.expand_path(path.to_s) }.uniq.sort
+      LookupSignature.new(roots: normalized.freeze, digest: lookup_signature_digest(normalized)).freeze
+    end
+
+    def lookup_signature_current?(signature)
+      return true if signature.nil?
+
+      lookup_signature_digest(signature.roots) == signature.digest
+    end
+
+    def lookup_signature_digest(roots)
+      payload = Array(roots).map do |root|
+        stages_root = File.join(root, ".hive-state", "stages")
+        stage_dirs = Dir.glob(File.join(stages_root, "*-*"))
+                        .select { |path| File.directory?(path) }
+                        .sort
+        stages = stage_dirs.map do |stage_dir|
+          stage_name = File.basename(stage_dir)
+          entries = Dir.children(stage_dir).sort.filter_map do |child|
+            folder = File.join(stage_dir, child)
+            folder_stat = File.lstat(folder)
+            next unless folder_stat.directory? && !folder_stat.symlink?
+
+            meta_path = Hive::TaskMeta.path(folder)
+            meta_sig = begin
+              meta_stat = File.lstat(meta_path)
+              [ meta_stat.dev, meta_stat.ino, meta_stat.size, meta_stat.mtime.tv_sec, meta_stat.mtime.tv_nsec ]
+            rescue Errno::ENOENT
+              nil
+            rescue SystemCallError
+              :unreadable
+            end
+            [ child, folder_stat.dev, folder_stat.ino, meta_sig ]
+          rescue SystemCallError
+            [ child, :unreadable ]
+          end
+          [ stage_name, entries ]
+        end
+        [ root, stages ]
+      rescue SystemCallError => e
+        [ root, "error:#{e.class}" ]
+      end
+      Digest::SHA256.hexdigest(JSON.generate(payload))
+    end
+
+    def hint_provider(registry_entries)
+      entries = Array(registry_entries).freeze
+      ->(project_name) { project_hint_lookup(project_name, registry_entries: entries) }
+    end
+
+    # Project-scoped complete active-and-archived scan used exclusively for
+    # unique suggestion hints when a covered plan dependency defect occurs.
+    # Never called on normal fleet snapshots without covered plan errors.
+    def project_hint_lookup(project_name, registry_entries: Hive::Config.registered_projects)
+      matches = Array(registry_entries).select { |entry| entry["name"].to_s == project_name.to_s }
+      unless matches.one?
+        return Hive::DependencyAdmission::ProjectHintLookup.new(
+          project: project_name, complete: false
+        )
+      end
+
+      root = File.expand_path(matches.first.fetch("path"))
+      stages_root = File.join(root, ".hive-state", "stages")
+      unless File.directory?(root) && File.directory?(stages_root)
+        return Hive::DependencyAdmission::ProjectHintLookup.new(
+          project: project_name, complete: false
+        )
+      end
+
+      complete = true
+      tasks = []
+      counts = Hash.new(0)
+      stage_dirs = Dir.children(stages_root).sort.filter_map do |entry|
+        next unless entry.include?("-")
+
+        path = File.join(stages_root, entry)
+        path if File.directory?(path) && !File.symlink?(path)
+      end
+
+      stage_dirs.each do |stage_dir|
+        Dir.children(stage_dir).sort.each do |child|
+          folder = File.join(stage_dir, child)
+          stat = File.lstat(folder)
+          next unless stat.directory? && !stat.symlink?
+
+          before_id = [ stat.dev, stat.ino ]
+          metadata = Hive::TaskMeta.read_for_admission(folder)
+          after_id = folder_identity(folder)
+          if after_id.nil? || after_id != before_id
+            complete = false
+            next
+          end
+          if metadata.status == :unreadable ||
+             (metadata.status == :invalid && metadata.reason != :reference_invalid)
+            complete = false
+            next
+          end
+
+          slug = metadata.data[:slug] || child
+          counts[[ project_name.to_s, slug.to_s ]] += 1
+          tasks << Hive::DependencyAdmission::HintTask.new(
+            project: project_name.to_s,
+            slug: slug.to_s,
+            idempotency_key: metadata.data[:idempotency_key]
+          ).freeze
+        end
+      end
+
+      duplicates = counts.select { |_identity, count| count > 1 }.keys
+      Hive::DependencyAdmission::ProjectHintLookup.new(
+        project: project_name,
+        complete: complete,
+        tasks: tasks,
+        duplicate_identities: duplicates
+      )
+    rescue StandardError
+      Hive::DependencyAdmission::ProjectHintLookup.new(
+        project: project_name, complete: false
+      )
     end
 
     # Recompute dependency admission from disk and raise the typed manual
     # boundary error. Callers invoke this while holding the depending task's
     # lock immediately before forward side effects.
-    def enforce_admission!(task, registry_entries: Hive::Config.registered_projects)
+    #
+    # When `allow_local_plan_repair: true` (granted only to explicit
+    # `hive plan <root-slug> --project <project> --from 3-plan`), a task whose
+    # own `plan.md` carries a covered local dependency defect is evaluated with
+    # that local plan diagnostic separated, so the root can be repaired even
+    # while invalid bytes remain on disk, while retaining every unrelated
+    # metadata, environment, cycle, and inherited prerequisite wait.
+    def enforce_admission!(task, registry_entries: Hive::Config.registered_projects,
+                           allow_local_plan_repair: false)
       project = registry_entries.select do |entry|
         File.expand_path(entry.fetch("path")) == File.expand_path(task.project_root)
       end
@@ -445,14 +648,58 @@ module Hive
         )
       end
 
-      verdict = admission_context(registry_entries).verdict(
-        project: project.first.fetch("name"),
-        slug: task.slug
-      )
+      project_name = project.first.fetch("name")
+      context = admission_context(registry_entries)
+      verdict = context.verdict(project: project_name, slug: task.slug)
       return verdict if verdict.clear?
+
+      if allow_local_plan_repair
+        require "hive/plan_dependency_adoption"
+        local_validation = Hive::PlanDependencyAdoption.validate(
+          task, admission_context: context, registry_entries: registry_entries
+        )
+        if local_validation.covered_defect?
+          separated = context.verdict_without_local_plan(project: project_name, slug: task.slug)
+          return separated if separated.clear?
+
+          verdict = separated
+        end
+      end
 
       if verdict.wait?
         unmet_dependencies = verdict.unmet_dependencies
+        repair_roots = verdict.dependency_repair_roots
+        if repair_roots.any?
+          remaining_unmet = unmet_dependencies.reject do |unmet|
+            repair_roots.any? do |root|
+              Hive::Dependencies.repair_root_matches_target?(
+                root, unmet.blocked_by, current_project: project_name
+              )
+            end
+          end
+          summary = Hive::Dependencies.blocker_summary(
+            depends_on: task.depends_on,
+            blocked_by: verdict.blocked_by,
+            dependency_stage: verdict.dependency_stage,
+            unmet_dependencies: remaining_unmet,
+            dependency_repair_roots: repair_roots,
+            current_project: project_name
+          )
+          root_corrections = repair_roots.map do |root|
+            "Repair #{root.qualified_identity} (#{root.safe_correction})"
+          end
+          wait_corrections = remaining_unmet.map do |unmet|
+            "wait for #{unmet.blocked_by} to reach #{unmet.required_gate} " \
+              "(currently at #{unmet.dependency_stage})"
+          end
+          correction = (root_corrections + wait_corrections).join("; ")
+          raise Hive::DependencyWaitError.new(
+            "dependency wait: #{task.slug} is #{summary}",
+            offending_ref: repair_roots.first.qualified_identity,
+            safe_correction: correction
+          )
+        end
+
         waits = unmet_dependencies.map do |unmet|
           ref = unmet.blocked_by.to_s
           "#{ref} at #{unmet.dependency_stage} (needs #{unmet.required_gate})"
@@ -558,6 +805,9 @@ module Hive
         [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
           dependency.required_gate ]
       end
+      repair_roots = verdict.dependency_repair_roots.map do |root|
+        [ root.project, root.slug, root.reason_code, root.offending_ref, root.safe_correction ]
+      end
       payload = [
         "hive-dependency-admission-v2", project, task.slug.to_s,
         declaration,
@@ -565,6 +815,7 @@ module Hive
         unmet, base_mode,
         error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
       ]
+      payload << repair_roots unless repair_roots.empty?
       ::Digest::SHA256.hexdigest(JSON.generate(payload))
     rescue StandardError => e
       ::Digest::SHA256.hexdigest(
@@ -639,19 +890,39 @@ module Hive
       )
     end
 
-    def cross_project_identity_targets(projects)
-      projects.each_with_object({}) do |project, targets|
+    def cross_project_identity_targets(projects, extra_references: nil)
+      targets = projects.each_with_object({}) do |project, index|
         project.tasks.each do |task|
-          Hive::Dependencies.declaration_references(task.depends_on).each do |reference|
-            targets[reference.project] = true if reference.explicit_project
+          task_references_for_scan(task).each do |reference|
+            index[reference.project] = true if reference.explicit_project
           end
+        end
+      end
+      Array(extra_references).each do |_source_project, reference|
+        targets[reference.project] = true if reference&.explicit_project
+      end
+      targets.keys.freeze
+    end
+
+    def task_references_for_scan(task)
+      refs = []
+      [ task.depends_on, task.plan_dependency ].each do |declaration|
+        next if declaration.nil?
+
+        begin
+          refs.concat(Hive::Dependencies.declaration_references(declaration))
         rescue Hive::Dependencies::InvalidReference
           next
         end
-      end.keys.freeze
+      end
+      Array(task.plan_entries).each do |entry|
+        refs << entry.reference if entry&.reference
+      end
+      refs.uniq(&:to_s)
     end
 
-    def dependency_fallback_tasks(entries, projects, workflow_generations: nil, project_configs: nil)
+    def dependency_fallback_tasks(entries, projects, workflow_generations: nil,
+                                  project_configs: nil, extra_references: nil)
       entries_by_name = entries.group_by { |entry| entry["name"].to_s }
       active_by_name = projects.to_h do |project|
         [ project.name, dependency_task_indexes(project.tasks) ]
@@ -663,9 +934,10 @@ module Hive
       errors = {}
       queue = projects.flat_map do |project|
         project.tasks.flat_map do |task|
-          dependency_queue_entries(task.project, task.depends_on)
+          task_references_for_scan(task).map { |reference| [ task.project, reference ] }
         end
       end
+      queue.concat(Array(extra_references)) if extra_references
       seen = {}
       cursor = 0
 
@@ -696,7 +968,9 @@ module Hive
           fallback[target_name].concat(tasks)
           tasks.each do |task|
             add_dependency_task_to_indexes(fallback_indexes[target_name], task)
-            queue.concat(dependency_queue_entries(task.project, task.depends_on))
+            queue.concat(
+              task_references_for_scan(task).map { |ref| [ task.project, ref ] }
+            )
           end
         rescue StandardError => e
           errors[target_name] ||= "targeted dependency scan failed: #{e.class}: #{e.message}"
@@ -956,7 +1230,12 @@ module Hive
         folder: folder,
         validation_error: validation_error,
         cancelled: cancelled,
-        superseded_by: superseded_by
+        superseded_by: superseded_by,
+        idempotency_key: metadata.data[:idempotency_key],
+        plan_raw_depends_on: plan.raw_depends_on,
+        plan_issues: plan.issues,
+        plan_invalid_kind: plan.invalid_kind,
+        plan_entries: plan.entries
       )
     end
 

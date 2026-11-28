@@ -101,4 +101,41 @@ class TaskDisplayTest < ActiveSupport::TestCase
   test "unknown actions are not silently reported as ready" do
     assert_equal "Status unavailable", display("action" => "future_action", "action_label" => nil).label
   end
+
+  test "inherited dependency repair roots classify as ordinary waiting with root-directed detail" do
+    roots = [
+      {
+        "project" => "demo",
+        "slug" => "c5-root",
+        "reason_code" => "plan_dependency_invalid",
+        "offending_ref" => "F2, F3",
+        "safe_correction" => "Repair demo:c5-root."
+      }
+    ]
+    descendant = display(
+      "blocked" => true,
+      "blocked_by" => nil,
+      "unmet_dependencies" => [],
+      "dependency_repair_roots" => roots
+    )
+    assert_equal "waiting", descendant.state
+    assert_equal "Waiting on a task", descendant.label
+    assert_equal "Blocked by demo:c5-root: invalid depends_on F2, F3.", descendant.detail
+
+    own_defect = display(
+      "action" => "admission_error",
+      "action_label" => "Admission error",
+      "blocked" => true,
+      "admission_error" => { "safe_correction" => "Fix local plan.md." },
+      "dependency_repair_roots" => roots
+    )
+    assert_equal "attention", own_defect.state
+    assert_equal "Needs attention", own_defect.label
+    assert_includes own_defect.detail, "Fix local plan.md."
+    assert_includes own_defect.detail, "demo:c5-root: invalid depends_on F2, F3"
+
+    legacy_row = display("blocked" => true, "blocked_by" => "task-9")
+    assert_equal "waiting", legacy_row.state
+    assert_equal "Waiting for task-9.", legacy_row.detail
+  end
 end

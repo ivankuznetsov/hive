@@ -1,5 +1,6 @@
 require "shellwords"
 require "hive/config"
+require "hive/dependency_snapshot"
 require "hive/lock"
 require "hive/markers"
 require "hive/plan_review/transition_guard"
@@ -74,13 +75,27 @@ module Hive
             task: locked, destination: Hive::PlanReview::TransitionGuard::EXECUTE_STAGE,
             observation:, config: cfg
           )
+          if project_registered?(locked.project_root)
+            Hive::DependencySnapshot.enforce_admission!(locked)
+          end
           finalize_marker!(locked.state_file)
         end
 
         develop_command
-      rescue Hive::PlanReview::TransitionBlocked => error
+      rescue Hive::PlanReview::TransitionBlocked, Hive::DependencyAdmissionError,
+             Hive::DependencyWaitError => error
         raise NotApprovable, error.message
       end
+
+      def project_registered?(project_root)
+        expanded = File.expand_path(project_root.to_s)
+        Hive::Config.registered_projects.any? do |entry|
+          File.expand_path(entry.fetch("path")) == expanded
+        end
+      rescue StandardError
+        false
+      end
+      private_class_method :project_registered?
 
       def finalize_marker!(state_file)
         marker = Hive::Markers.current(state_file)

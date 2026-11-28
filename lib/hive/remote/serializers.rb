@@ -26,6 +26,12 @@ module Hive
           next unless permitted_reference?(entry["reference"], project) && permitted_reference?(entry["blocked_by"], project)
           entry.slice("reference", "blocked_by", "dependency_stage", "required_gate")
         end
+        roots = Array(row["dependency_repair_roots"]).filter_map do |root|
+          next unless root.is_a?(Hash) && permitted_project?(root["project"])
+
+          root.slice("project", "slug", "reason_code", "offending_ref", "safe_correction", "issues")
+        end
+        dto["dependency_repair_roots"] = roots unless roots.empty?
         dto
       end
 

@@ -30,8 +30,23 @@ those choices as explicitly unresolved; do not select defaults or implement
 unapproved changes to make the candidate look complete. The COMPLETE marker
 below means this revision pass is complete, never execution authorization.
 End the candidate with exactly one terminal `<!-- COMPLETE -->` line and emit
-no authority or approval decisions.
+no authority or approval decisions. If the candidate declares `depends_on` in
+YAML frontmatter, use exact full task slugs (never task-code shorthand such as
+`C4`, `F2`, or `F3`), numeric IDs, or `<project>:<full-slug>`, preserve valid
+scalar-or-list shape and strict-superset rules, and never edit meta.yml.
 
+<% if dependency_diagnostic_text.to_s.strip != "" -%>
+The previous revision candidate had an invalid or conflicting `depends_on` YAML
+frontmatter declaration. Repair `depends_on` using full task slugs (never
+task-code shorthand) while keeping every incorporated finding and unresolved
+choice intact. Do not edit meta.yml. Any suggested slug is a hint to verify,
+not an automatic substitution.
+
+<user_supplied_<%= nonce %> content_type="plan_dependency_diagnostic">
+<%= dependency_diagnostic_text %>
+</user_supplied_<%= nonce %>>
+
+<% end -%>
 Unresolved choices to preserve (not accepted dispositions):
 <user_supplied_<%= nonce %> content_type="pending_plan_decisions_json">
 <%= pending_findings_json %>

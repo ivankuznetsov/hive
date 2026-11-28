@@ -15,7 +15,8 @@ module Hive
       ENV_PREFIX = "HIVE_ATTEMPT_"
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token, :command_context, :remote_authority, :proposal_binding
+                  :progress_token, :command_context, :remote_authority, :proposal_binding,
+                  :automated_dispatch
 
       class << self
         def current
@@ -62,6 +63,7 @@ module Hive
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
           command_context = load_command_context(repository, record)
           remote_authority = load_remote_authority(repository, record, command_context)
+          automated_dispatch = automated_dispatch_request?(repository, record)
           writable_command_context = writable_command_context(repository, command_context, remote_authority)
           evidence_writer = if record["routing"]["mode"] == "explicit"
             EvidenceChannel::Writer.for_fd(
@@ -84,6 +86,7 @@ module Hive
             routing: record["routing"],
             command_context: writable_command_context,
             remote_authority: remote_authority,
+            automated_dispatch: automated_dispatch,
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
           )
@@ -116,6 +119,16 @@ module Hive
           # attempt journal owns execution and its persisted dispatch context
           # remains the immutable receipt/principal reference.
           nil
+        end
+
+        def automated_dispatch_request?(repository, record)
+          request_id = record["request_id"].to_s
+          return false if request_id.empty?
+
+          require "hive/runtime_control_plane/dispatch_repository"
+          !Hive::RuntimeControlPlane::DispatchRepository.new(database: repository.database).fetch(request_id).nil?
+        rescue StandardError
+          false
         end
 
         def load_remote_authority(repository, record, command_context)
@@ -263,7 +276,7 @@ module Hive
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
                      progress_token: nil, command_context: nil, remote_authority: nil,
-                     proposal_binding: nil)
+                     proposal_binding: nil, automated_dispatch: false)
         @attempt_id = attempt_id.to_s
         @task_generation = Integer(task_generation)
         @ownership_generation = ownership_generation&.to_s
@@ -274,6 +287,7 @@ module Hive
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
         @command_context = command_context
         @remote_authority = remote_authority && deep_freeze(Hive::StringifyKeys.call(remote_authority))
+        @automated_dispatch = automated_dispatch == true
         @proposal_binding = if proposal_binding
           deep_freeze(Hive::StringifyKeys.call(proposal_binding))
         end
@@ -285,6 +299,7 @@ module Hive
         raise ArgumentError, "attempt context requires a numeric task generation"
       end
 
+      def automated_dispatch? = @automated_dispatch == true
       def explicit_routing? = routing["mode"] == "explicit"
       def admitted_route = explicit_routing? ? routing.fetch("route") : nil
       def provider_account_id = admitted_route&.fetch("provider_account_id", nil)

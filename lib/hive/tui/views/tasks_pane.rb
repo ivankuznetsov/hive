@@ -234,7 +234,9 @@ module Hive
           # layouts while still surfacing the owner when space permits.
           parts = [ base ]
           parts << auto_residue_token(row)
-          parts << dependency_status(row) if row.blocked && !row.admission_error
+          if (row.blocked && !row.admission_error) || Array(row.dependency_repair_roots).any?
+            parts << dependency_status(row)
+          end
           parts << implementation_owner_token(row)
           parts.reject { |part| part.to_s.empty? }.join(" ")
         end
@@ -289,7 +291,9 @@ module Hive
             depends_on: row.depends_on,
             blocked_by: row.blocked_by,
             dependency_stage: row.dependency_stage,
-            unmet_dependencies: row.unmet_dependencies
+            unmet_dependencies: row.unmet_dependencies,
+            dependency_repair_roots: row.dependency_repair_roots,
+            current_project: row.project_name
           )
         end
 

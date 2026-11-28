@@ -4,11 +4,18 @@ require "json"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
+require "hive/commands/stage_action"
+require "hive/daemon/policy"
+require "hive/plan_dependency_correction"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/transition_guard"
 require "hive/stages/plan"
+require "hive/task_action"
+require_relative "../support/plan_dependency_incident_fixture"
 
 class RunPlanTest < Minitest::Test
   include HiveTestHelper
+  include PlanDependencyIncidentFixture
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
 
@@ -307,6 +314,162 @@ class RunPlanTest < Minitest::Test
         events = File.readlines(File.join(plan_dir, "events.jsonl"), chomp: true)
           .map { |line| JSON.parse(line) }
         assert_includes events.map { |event| event.fetch("event_type") }, "round_waiting"
+      end
+    end
+  end
+
+  def test_initial_invalid_plan_list_receives_one_correction_adopts_list_and_clears_review
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(project, "c5 root", slug_override: "c5-root").call
+        end
+        create_done_prerequisite(dir, slug: "f2-payments-261030-aaaa", id: 2,
+                                      idempotency_key: "#{project}:F2:v1")
+        create_done_prerequisite(dir, slug: "f3-ledger-261030-bbbb", id: 3,
+                                      idempotency_key: "#{project}:F3:v1")
+        plan_dir = move_stage_task(dir, "c5-root", from: "1-inbox", to: "3-plan")
+        File.write(File.join(plan_dir, "brainstorm.md"), "## Requirements\n- x\n<!-- COMPLETE -->\n")
+        plan_md = File.join(plan_dir, "plan.md")
+
+        spawns = []
+        first_output = incident_plan_markdown(depends_on: %w[F2 F3], low_risk: true)
+        second_output = incident_plan_markdown(
+          depends_on: %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb], low_risk: true
+        )
+        fake_agent = lambda do |_task, _cfg, prompt, _profile, **|
+          spawns << prompt
+          if spawns.length == 1
+            File.write(plan_md, first_output)
+          else
+            File.write(plan_md, second_output)
+          end
+          { exit_code: 0, model: "claude-opus-4-6" }
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Plan, :spawn_plan_agent, fake_agent) do
+          capture_io { Hive::Commands::Run.new(plan_dir).call }
+        end
+
+        assert_equal 2, spawns.length, "initial invalid plan must receive exactly one correction"
+        assert_includes spawns[1], "F2"
+        assert_includes spawns[1], "F3"
+        assert_includes spawns[1], "f2-payments-261030-aaaa"
+        assert_includes spawns[1], "f3-ledger-261030-bbbb"
+        assert_equal :complete, Hive::Markers.current(plan_md).name
+        assert_equal %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb],
+                     Hive::TaskMeta.read(plan_dir)[:depends_on]
+        review = JSON.parse(File.read(File.join(plan_dir, "plan-review", "current.json")))
+        assert_equal "skipped", review.fetch("state")
+        assert_equal true, review.fetch("execution_allowed")
+        task = Hive::Task.new(plan_dir)
+        projection = Hive::PlanReview::Projection.load(task_folder: plan_dir)
+        freshness = Hive::PlanReview::TransitionGuard.freshness(
+          task: task, projection: projection, config: Hive::Config.load(dir)
+        )
+        assert_equal "current", freshness.fetch("status")
+        state = Hive::PlanDependencyCorrection.read(plan_dir)
+        assert_equal false, state.dig("initial", "exhausted")
+      end
+    end
+  end
+
+  def test_permanent_initial_defect_holds_for_operator_and_explicit_hive_plan_recovers_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(project, "c5 root", slug_override: "c5-root").call
+        end
+        create_done_prerequisite(dir, slug: "f2-payments-261030-aaaa", id: 2,
+                                      idempotency_key: "#{project}:F2:v1")
+        create_done_prerequisite(dir, slug: "f3-ledger-261030-bbbb", id: 3,
+                                      idempotency_key: "#{project}:F3:v1")
+        plan_dir = move_stage_task(dir, "c5-root", from: "1-inbox", to: "3-plan")
+        File.write(File.join(plan_dir, "brainstorm.md"), "## Requirements\n- x\n<!-- COMPLETE -->\n")
+        plan_md = File.join(plan_dir, "plan.md")
+
+        spawns = []
+        outputs = [
+          incident_plan_markdown(depends_on: %w[F2 F3], low_risk: true),
+          incident_plan_markdown(depends_on: %w[F2 ghost-unknown-slug], low_risk: true),
+          incident_plan_markdown(depends_on: %w[F2 F3], low_risk: true),
+          incident_plan_markdown(
+            depends_on: %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb], low_risk: true
+          )
+        ]
+        fake_agent = lambda do |_task, _cfg, prompt, _profile, **|
+          spawns << prompt
+          File.write(plan_md, outputs.shift)
+          { exit_code: 0, model: "claude-opus-4-6" }
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Plan, :spawn_plan_agent, fake_agent) do
+          capture_io do
+            err = assert_raises(Hive::TaskInErrorState) do
+              Hive::Commands::Run.new(plan_dir).call
+            end
+            assert_includes err.message, "plan_dependency_correction_exhausted"
+          end
+        end
+
+        assert_equal 2, spawns.length
+        assert_equal :error, Hive::Markers.current(plan_md).name
+        assert_nil Hive::TaskMeta.read(plan_dir)[:depends_on]
+        refute File.exist?(File.join(plan_dir, "plan-review", "current.json"))
+        state = Hive::PlanDependencyCorrection.read(plan_dir)
+        assert_equal true, state.dig("initial", "exhausted")
+        first_invocation_id = state.dig("initial", "invocation_id")
+
+        task = Hive::Task.new(plan_dir)
+        action = Hive::TaskAction.for(task, Hive::Markers.current(plan_md), config: Hive::Config.load(dir))
+        assert_equal Hive::Schemas::TaskActionKind::ERROR, action.key
+        assert_nil action.command
+        assert_equal :skip, Hive::Daemon::Policy.decide(
+          action: action.key, stage: "3-plan", command: action.command,
+          state_file_mtime: File.mtime(plan_md), last_dispatched_state_file_mtime: nil,
+          blocked: true, admission_error: true, dependency_correction_exhausted: true,
+          now: Time.now.utc
+        )
+
+        # Generic run and automated daemon dispatch refuse without spending another spawn.
+        with_replaced_singleton_method(Hive::Stages::Plan, :spawn_plan_agent, fake_agent) do
+          err = assert_raises(Hive::DependencyAdmissionError) do
+            Hive::Commands::Run.new(plan_dir, quiet: true).call
+          end
+          assert_equal "plan_dependency_invalid", err.reason_code
+
+          with_env("HIVE_DAEMON_AUTOMATED_DISPATCH" => "1") do
+            auto_err = assert_raises(Hive::DependencyAdmissionError) do
+              Hive::Commands::StageAction.new("plan", "c5-root", project: project, from: "3-plan").call
+            end
+            assert_equal "plan_dependency_invalid", auto_err.reason_code
+          end
+        end
+        assert_equal 2, spawns.length
+
+        # Explicit operator root repair starts one fresh bounded invocation even with invalid bytes in plan.md.
+        with_replaced_singleton_method(Hive::Stages::Plan, :spawn_plan_agent, fake_agent) do
+          capture_io do
+            Hive::Commands::StageAction.new("plan", "c5-root", project: project, from: "3-plan").call
+          end
+        end
+
+        assert_equal 4, spawns.length, "explicit root repair grants one fresh invocation with at most one correction"
+        assert_includes spawns[2], "ghost-unknown-slug"
+        assert_includes spawns[3], "f3-ledger-261030-bbbb"
+        assert_equal :complete, Hive::Markers.current(plan_md).name
+        assert_equal %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb],
+                     Hive::TaskMeta.read(plan_dir)[:depends_on]
+        review = JSON.parse(File.read(File.join(plan_dir, "plan-review", "current.json")))
+        assert_equal "skipped", review.fetch("state")
+        assert_equal true, review.fetch("execution_allowed")
+        repaired_state = Hive::PlanDependencyCorrection.read(plan_dir)
+        refute_equal first_invocation_id, repaired_state.dig("initial", "invocation_id")
+        assert_equal false, repaired_state.dig("initial", "exhausted")
       end
     end
   end

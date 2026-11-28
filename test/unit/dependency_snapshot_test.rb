@@ -1694,6 +1694,127 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_admission_task_reads_idempotency_key_and_plan_issues
+    with_tmp_dir do |root|
+      folder = execute_folder(root, "task-a")
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(
+        folder, id: 1, slug: "task-a", display_name: "Task A",
+        idempotency_key: "app:c4:v1", input_fingerprint: "fp-1"
+      )
+      File.write(File.join(folder, "plan.md"), "---\ndepends_on:\n  - C4\n  - F2\n---\n# Plan\n")
+
+      snapshot = Hive::DependencySnapshot.admission_task(root, folder, {}, project_name: "app")
+
+      assert_equal "app:c4:v1", snapshot.idempotency_key
+      assert_equal :invalid, snapshot.plan_status
+      assert_equal [ 0, 1 ], snapshot.plan_issues.map(&:index)
+      assert_equal %w[C4 F2], snapshot.plan_issues.map(&:raw_value)
+    end
+  end
+
+  def test_project_hint_lookup_scans_complete_active_and_archived_and_suppresses_on_corrupt_or_duplicate
+    with_tmp_dir do |root|
+      app = File.join(root, "app")
+      FileUtils.mkdir_p(File.join(app, ".hive-state", "stages", "4-execute", "c4-auth-261030-aaaa"))
+      Hive::TaskMeta.write(
+        File.join(app, ".hive-state", "stages", "4-execute", "c4-auth-261030-aaaa"),
+        id: 1, slug: "c4-auth-261030-aaaa", display_name: nil
+      )
+      archived = File.join(app, ".hive-state", "stages", "9-done", "archived-pin-261030-bbbb")
+      FileUtils.mkdir_p(archived)
+      Hive::TaskMeta.write(
+        archived, id: 2, slug: "archived-pin-261030-bbbb", display_name: nil,
+        idempotency_key: "app:f3:v1", input_fingerprint: "fp-2"
+      )
+      registry = [ { "name" => "app", "path" => app, "repository_identity" => nil } ]
+
+      lookup = Hive::DependencySnapshot.project_hint_lookup("app", registry_entries: registry)
+      assert lookup.complete?
+      assert_equal "c4-auth-261030-aaaa", lookup.suggest("C4")
+      assert_equal "archived-pin-261030-bbbb", lookup.suggest("F3")
+
+      # Duplicate identity suppresses hints
+      dup = File.join(app, ".hive-state", "stages", "9-done", "c4-auth-261030-aaaa")
+      FileUtils.mkdir_p(dup)
+      Hive::TaskMeta.write(dup, id: 1, slug: "c4-auth-261030-aaaa", display_name: nil)
+      dup_lookup = Hive::DependencySnapshot.project_hint_lookup("app", registry_entries: registry)
+      assert_nil dup_lookup.suggest("F3")
+      FileUtils.rm_rf(dup)
+
+      # Corrupt unreadable meta.yml marks coverage incomplete and suppresses hints
+      corrupt = File.join(app, ".hive-state", "stages", "4-execute", "broken-meta")
+      FileUtils.mkdir_p(corrupt)
+      File.write(File.join(corrupt, "meta.yml"), "id: [unterminated\n")
+      incomplete = Hive::DependencySnapshot.project_hint_lookup("app", registry_entries: registry)
+      refute incomplete.complete?
+      assert_nil incomplete.suggest("C4")
+    end
+  end
+
+  def test_normal_fleet_snapshot_does_not_invoke_hint_lookup_and_resolves_archived_plan_only_targets
+    with_tmp_dir do |root|
+      archived = write_task_meta(root, "9-done", "archived-base", id: 1)
+      File.write(File.join(archived, "task.md"), "# Done\n<!-- COMPLETE -->\n")
+      active = write_task_meta(root, "3-plan", "active-dependent", id: 2)
+      File.write(File.join(active, "plan.md"), "---\ndepends_on: archived-base\n---\n# Plan\n")
+      registry = [ { "name" => "app", "path" => root, "repository_identity" => nil } ]
+
+      hint_calls = 0
+      verdict = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :project_hint_lookup,
+        ->(*, **) { hint_calls += 1; Hive::DependencyAdmission::ProjectHintLookup.new(project: "app", complete: false) }
+      ) do
+        context = Hive::DependencySnapshot.active_admission_context(registry)
+        context.verdict(project: "app", slug: "active-dependent")
+      end
+
+      assert_equal 0, hint_calls
+      assert verdict.error?
+      assert_equal "plan_dependency_missing", verdict.admission_error.reason_code
+    end
+  end
+
+  def test_enforce_admission_raises_wait_error_for_inherited_root_and_updates_fingerprint_on_recovery
+    with_tmp_dir do |root|
+      prepare_test_runtime_project(root)
+      c5_folder = write_task_meta(root, "3-plan", "c5-root", id: 1)
+      File.write(File.join(c5_folder, "plan.md"), "---\ndepends_on:\n  - F2\n  - F3\n---\n# Plan\n")
+      c6_folder = write_task_meta(root, "2-brainstorm", "c6-child", id: 2)
+      Hive::TaskMeta.write(c6_folder, id: 2, slug: "c6-child", display_name: nil, depends_on: "c5-root")
+
+      registry = [ { "name" => "app", "path" => root, "repository_identity" => "github.com/acme/app" } ]
+      c5_task = Hive::Task.new(c5_folder)
+      c6_task = Hive::Task.new(c6_folder)
+
+      root_err = assert_raises(Hive::DependencyAdmissionError) do
+        Hive::DependencySnapshot.enforce_admission!(c5_task, registry_entries: registry)
+      end
+      assert_equal "plan_dependency_invalid", root_err.reason_code
+
+      child_err = assert_raises(Hive::DependencyWaitError) do
+        Hive::DependencySnapshot.enforce_admission!(c6_task, registry_entries: registry)
+      end
+      assert_includes child_err.message, "app:c5-root: invalid depends_on F2, F3"
+      assert_equal "app:c5-root", child_err.offending_ref
+      assert_includes child_err.safe_correction, "Repair app:c5-root"
+
+      fp_broken = Hive::DependencySnapshot.admission_fingerprint(c6_task, registry_entries: registry)
+
+      # Repair c5-root: remove invalid frontmatter; c6 still waits on c5's stage gate,
+      # and fingerprint changes cleanly.
+      File.write(File.join(c5_folder, "plan.md"), "# Repaired Plan\n")
+      fp_repaired = Hive::DependencySnapshot.admission_fingerprint(c6_task, registry_entries: registry)
+      refute_equal fp_broken, fp_repaired
+
+      child_gate_err = assert_raises(Hive::DependencyWaitError) do
+        Hive::DependencySnapshot.enforce_admission!(c6_task, registry_entries: registry)
+      end
+      refute_includes child_gate_err.message, "invalid depends_on"
+      assert_includes child_gate_err.message, "c5-root at 3-plan"
+    end
+  end
+
   private
 
   def write_task_meta(root, stage, slug, id:)

@@ -1,3 +1,4 @@
+require "securerandom"
 require "hive/stages/base"
 require "hive/claude_launcher"
 require "hive/plan_review/marker_sync"
@@ -7,6 +8,7 @@ require "hive/plan_review/transition_guard"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/planner_identity"
 require "hive/plan_dependency_adoption"
+require "hive/plan_dependency_correction"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
@@ -44,17 +46,51 @@ module Hive
 
       module_function
 
-      def run!(task, cfg)
+      def run!(task, cfg, explicit_plan_repair: false)
         observation = Hive::DependencySnapshot.observe_for_admission!(
           task, missing_message: "plan task is missing before execution"
         )
 
         if cleared_plan_ready?(task, cfg)
-          return { commit: action_for(:complete), status: :complete, plan_review: nil }
+          validation = Hive::PlanDependencyAdoption.validate(task)
+          if validation.ok? && !validation.adoptable?
+            return { commit: action_for(:complete), status: :complete, plan_review: nil }
+          end
+
+          unless explicit_plan_repair && validation.covered_defect?
+            Hive::PlanDependencyCorrection.record_cleared_plan_diagnostic!(
+              task.folder,
+              observation: observation,
+              plan_digest: validation.plan_digest,
+              diagnostic: validation
+            )
+            warn "[hive] plan: cleared plan #{task.slug} failed dependency validation " \
+                 "(#{validation.reason_code || 'plan_dependency_missing'}: #{validation.offending_ref}); " \
+                 "replan explicitly with `#{Hive::PlanDependencyCorrection.repair_command(task)}`"
+            return {
+              commit: nil,
+              status: :error,
+              plan_review: nil,
+              dependency_diagnostic: validation.to_h
+            }
+          end
+
+          return with_source_checkout(task) do |source|
+            run_with_source!(
+              task, cfg, source,
+              observation: observation,
+              explicit_plan_repair: true,
+              pre_existing_validation: validation
+            )
+          end
         end
 
         with_source_checkout(task) do |source|
-          run_with_source!(task, cfg, source, observation: observation)
+          run_with_source!(
+            task, cfg, source,
+            observation: observation,
+            explicit_plan_repair: explicit_plan_repair
+          )
         end
       ensure
         observation&.close
@@ -91,31 +127,99 @@ module Hive
         yield nil
       end
 
-      def run_with_source!(task, cfg, source_checkout, observation:)
+      def run_with_source!(task, cfg, source_checkout, observation:,
+                           explicit_plan_repair: false, pre_existing_validation: nil)
+        if explicit_plan_repair
+          existing_defect = pre_existing_validation || existing_covered_defect(task)
+          invocation_id = Hive::PlanDependencyCorrection.start_explicit_invocation!(
+            task.folder,
+            observation: observation,
+            existing_diagnostic: existing_defect
+          )
+          initial_diagnostic_text = existing_defect ?
+            Hive::PlanDependencyCorrection.format_prompt_diagnostic(existing_defect) : ""
+        else
+          if Hive::PlanDependencyCorrection.initial_exhausted?(task.folder)
+            ensure_exhausted_marker!(task)
+            return { commit: action_for(:error), status: :error, plan_review: nil }
+          end
+          invocation_id = Hive::Attempts::Context.current&.attempt_id ||
+            "plan-#{SecureRandom.hex(12)}"
+          initial_diagnostic_text = ""
+        end
+
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
         skill = Hive::Config.stage_skill(cfg, "plan")
-        prompt = Hive::Stages::Base.render(
-          "plan_prompt.md.erb",
-          Hive::Stages::Base::TemplateBindings.new(
-            project_name: File.basename(task.project_root),
-            task_folder: task.folder,
-            brainstorm_text: brainstorm_text,
-            carried_decisions_text: carried_decisions_text(task),
-            source_checkout: source_checkout,
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
-            skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
-              profile, skill, project_root: task.project_root
-            )
-          )
+        prompt = render_plan_prompt(
+          task: task,
+          brainstorm_text: brainstorm_text,
+          source_checkout: source_checkout,
+          profile: profile,
+          skill: skill,
+          dependency_diagnostic_text: initial_diagnostic_text
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
         ensure_durable_checkpoint!(task)
         result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout)
         marker = Hive::Markers.current(task.state_file)
-        adopt_plan_dependency!(task, marker, observation: observation)
+
+        if %i[waiting complete].include?(marker.name)
+          validation = Hive::PlanDependencyAdoption.validate(task)
+          if validation.covered_defect?
+            reserved = Hive::PlanDependencyCorrection.reserve_initial_correction!(
+              task.folder,
+              observation: observation,
+              invocation_id: invocation_id,
+              input_digest: validation.plan_digest,
+              diagnostic: validation
+            )
+            unless reserved
+              exhaust_initial_plan_dependency!(
+                task, observation: observation, invocation_id: invocation_id, validation: validation
+              )
+              return { commit: action_for(:error), status: :error, plan_review: nil }
+            end
+
+            correction_prompt = render_plan_prompt(
+              task: task,
+              brainstorm_text: brainstorm_text,
+              source_checkout: source_checkout,
+              profile: profile,
+              skill: skill,
+              dependency_diagnostic_text: Hive::PlanDependencyCorrection.format_prompt_diagnostic(validation)
+            )
+            result = spawn_plan_agent(task, cfg, correction_prompt, profile, source_checkout: source_checkout)
+            marker = Hive::Markers.current(task.state_file)
+            unless %i[waiting complete].include?(marker.name)
+              return { commit: action_for(marker.name), status: marker.name, plan_review: nil }
+            end
+
+            validation = Hive::PlanDependencyAdoption.validate(task)
+            if validation.covered_defect?
+              exhaust_initial_plan_dependency!(
+                task, observation: observation, invocation_id: invocation_id, validation: validation
+              )
+              return { commit: action_for(:error), status: :error, plan_review: nil }
+            end
+          end
+
+          if validation.noncovered_error?
+            warn "[hive] plan: deferring dependency adoption and review for #{task.slug} " \
+                 "(#{validation.reason_code}: #{validation.offending_ref}; #{validation.safe_correction})"
+            return { commit: action_for(marker.name), status: marker.name, plan_review: nil }
+          end
+
+          Hive::PlanDependencyCorrection.clear_initial_resolved!(
+            task.folder, observation: observation, invocation_id: invocation_id
+          )
+          unless adopt_plan_dependency_with_status!(task, marker, observation: observation, validation: validation)
+            return { commit: action_for(marker.name), status: marker.name, plan_review: nil }
+          end
+        end
+
         review = start_plan_review(
           task, cfg, profile, result, marker, observation: observation
         )
@@ -125,6 +229,75 @@ module Hive
           commit: action_for(marker.name), status: marker.name,
           plan_review: review&.summary
         }
+      end
+
+      def render_plan_prompt(task:, brainstorm_text:, source_checkout:, profile:, skill:,
+                             dependency_diagnostic_text: "")
+        Hive::Stages::Base.render(
+          "plan_prompt.md.erb",
+          Hive::Stages::Base::TemplateBindings.new(
+            project_name: File.basename(task.project_root),
+            task_folder: task.folder,
+            brainstorm_text: brainstorm_text,
+            carried_decisions_text: carried_decisions_text(task),
+            dependency_diagnostic_text: dependency_diagnostic_text.to_s,
+            source_checkout: source_checkout,
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
+              profile, skill, project_root: task.project_root
+            )
+          )
+        )
+      end
+
+      def existing_covered_defect(task)
+        return nil unless File.file?(task.state_file)
+
+        validation = Hive::PlanDependencyAdoption.validate(task)
+        validation.covered_defect? ? validation : nil
+      rescue StandardError
+        nil
+      end
+
+      def exhaust_initial_plan_dependency!(task, observation:, invocation_id:, validation:)
+        Hive::PlanDependencyCorrection.mark_initial_exhausted!(
+          task.folder,
+          observation: observation,
+          invocation_id: invocation_id,
+          input_digest: validation.plan_digest,
+          diagnostic: validation
+        )
+        Hive::Markers.set(
+          task.state_file,
+          :error,
+          reason: Hive::PlanDependencyCorrection::EXHAUSTED_REASON,
+          dependency_reason: validation.reason_code.to_s,
+          offending_ref: validation.offending_ref.to_s,
+          message: Hive::PlanDependencyCorrection.exhausted_message(task: task, validation: validation)
+        )
+      end
+
+      def ensure_exhausted_marker!(task)
+        marker = Hive::Markers.current(task.state_file)
+        return if marker.name == :error && Hive::PlanDependencyCorrection.marker_exhausted?(marker.attrs)
+
+        state = Hive::PlanDependencyCorrection.read(task.folder)
+        diagnostic = state.dig("initial", "diagnostic")
+        attrs = {
+          reason: Hive::PlanDependencyCorrection::EXHAUSTED_REASON,
+          message: Hive::PlanDependencyCorrection.exhausted_message(task: task, validation: nil)
+        }
+        if diagnostic.is_a?(Hash)
+          attrs[:dependency_reason] = diagnostic["reason_code"].to_s if diagnostic["reason_code"]
+          attrs[:offending_ref] = diagnostic["offending_ref"].to_s if diagnostic["offending_ref"]
+          if diagnostic["reason_code"] && diagnostic["offending_ref"]
+            attrs[:message] = "plan dependency correction exhausted " \
+                              "(#{diagnostic['reason_code']}: #{diagnostic['offending_ref']}; " \
+                              "#{diagnostic['safe_correction']}); Hive will not retry automatically. " \
+                              "Repair with `#{Hive::PlanDependencyCorrection.repair_command(task)}`."
+          end
+        end
+        Hive::Markers.set(task.state_file, :error, attrs)
       end
 
       CARRIED_DESCRIPTION_BYTES = 2_000
@@ -183,10 +356,36 @@ module Hive
       # existing meta dependency is left for `plan_dependency_mismatch`) lives
       # in Hive::PlanDependencyAdoption, which plan-review candidate promotion
       # reuses.
-      def adopt_plan_dependency!(task, marker, observation:)
-        return unless marker.name == :complete
+      def adopt_plan_dependency!(task, marker, observation:, validation: nil)
+        adopt_plan_dependency_with_status!(
+          task, marker, observation: observation, validation: validation
+        )
+        nil
+      end
 
-        Hive::PlanDependencyAdoption.adopt!(task, observation: observation)
+      def adopt_plan_dependency_with_status!(task, marker, observation:, validation: nil)
+        return true unless marker.name == :complete
+
+        outcome = Hive::PlanDependencyAdoption.adopt_validated!(
+          task, observation: observation, validation: validation
+        )
+        if outcome.stale? && validation
+          outcome = Hive::PlanDependencyAdoption.adopt_validated!(
+            task, observation: observation
+          )
+        end
+        if outcome.ok?
+          true
+        elsif outcome.stale?
+          warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
+          false
+        elsif outcome.status == :failed && outcome.error
+          warn "[hive] plan: dependency adoption failed for #{task.slug} " \
+               "(#{outcome.error.class}: #{outcome.error.message.to_s.byteslice(0, 240)})"
+          false
+        else
+          false
+        end
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)

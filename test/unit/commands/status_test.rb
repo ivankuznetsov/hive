@@ -686,6 +686,9 @@ class CommandsStatusTest < Minitest::Test
   def test_plan_only_dependency_is_held_even_after_raw_stage_move
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
+      prereq = write_status_task(hive_state, "4-execute", "prerequisite-task",
+                                 state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(prereq, id: 2, slug: "prerequisite-task", display_name: nil)
       folder = write_status_task(hive_state, "5-open-pr", "plan-drift-task-260716-abcd",
                                  state_file: "pr.md", marker: "EXECUTE_COMPLETE")
       Hive::TaskMeta.write(folder, id: 1, slug: File.basename(folder), display_name: nil)
@@ -693,7 +696,7 @@ class CommandsStatusTest < Minitest::Test
 
       row = Hive::Commands::Status.new.json_payload([
         status_project(project_root, hive_state)
-      ]).fetch("projects").first.fetch("tasks").first
+      ]).fetch("projects").first.fetch("tasks").find { |task| task["slug"] == "plan-drift-task-260716-abcd" }
 
       assert_equal true, row.fetch("blocked")
       assert_equal "admission_error", row.fetch("action")

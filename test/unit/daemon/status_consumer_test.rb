@@ -768,4 +768,79 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_match(/envelope ok=false/, result.error)
     end
   end
+
+  def test_dependency_repair_roots_round_trip_and_old_row_compatibility
+    repair_roots = [
+      {
+        "project" => "app",
+        "slug" => "c5-root",
+        "reason_code" => "plan_dependency_invalid",
+        "offending_ref" => "F2, F3",
+        "safe_correction" => "Repair app:c5-root.",
+        "issues" => [
+          {
+            "index" => 0,
+            "raw_value" => "F2",
+            "display_value" => "F2",
+            "code" => "task_code_shorthand",
+            "message" => "use full task slug",
+            "suggestion" => "f2-payments-261030-aaaa"
+          }
+        ]
+      }
+    ]
+    payload = make_envelope(projects: [ {
+      "name" => "app",
+      "path" => "/tmp/app",
+      "hive_state_path" => "/tmp/app/.hive-state",
+      "tasks" => [
+        task_row(slug: "c6-direct", action: "ready_to_develop").merge(
+          "blocked" => true,
+          "blocked_by" => "c5-root",
+          "dependency_stage" => "3-plan",
+          "dependency_repair_roots" => repair_roots
+        ),
+        task_row(slug: "legacy-row", action: "ready_to_develop")
+      ]
+    } ])
+
+    with_status(payload) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
+      assert result.ok, result.error
+
+      c6 = result.rows.find { |r| r.slug == "c6-direct" }
+      assert_equal repair_roots, c6.dependency_repair_roots
+      assert_nil c6.admission_error, "inherited repair roots must not fall back to admission_error"
+
+      legacy = result.rows.find { |r| r.slug == "legacy-row" }
+      assert_equal [], legacy.dependency_repair_roots
+      assert_nil legacy.admission_error
+    end
+  end
+
+  def test_extract_admission_error_retains_exact_key_check_with_fallback
+    payload = make_envelope(projects: [ {
+      "name" => "app",
+      "path" => "/tmp/app",
+      "hive_state_path" => "/tmp/app/.hive-state",
+      "tasks" => [
+        task_row(slug: "widened-admission", action: "admission_error").merge(
+          "blocked" => true,
+          "admission_error" => {
+            "reason_code" => "plan_dependency_invalid",
+            "offending_ref" => "F2",
+            "safe_correction" => "Fix it.",
+            "extra_unexpected_key" => true
+          }
+        )
+      ]
+    } ])
+
+    with_status(payload) do |producer|
+      result = Hive::Daemon::StatusConsumer.new(producer: producer).fetch
+      assert result.ok, result.error
+      row = result.rows.first
+      assert_equal "dependency_validation_failed", row.admission_error.reason_code
+    end
+  end
 end

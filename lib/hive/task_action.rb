@@ -7,6 +7,7 @@ require "hive/workflows"
 require "hive/task_action/diagnostic"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
+require "hive/plan_dependency_correction"
 require "hive/plan_frontmatter"
 require "hive/task_projection/reader"
 require "hive/markers"
@@ -771,7 +772,9 @@ module Hive
         retry_due?(plan_review["retry_at"]) ?
           ACTIONS.fetch(:plan_review_retry_due) : ACTIONS.fetch(:plan_review_retry_wait)
       when "blocked"
-        if recoverable_decision_triage? || recoverable_transient_planner_revision?
+        if Hive::PlanDependencyCorrection.plan_review_exhausted?(plan_review)
+          ACTIONS.fetch(:plan_review_blocked)
+        elsif recoverable_decision_triage? || recoverable_transient_planner_revision?
           ACTIONS.fetch(:plan_reviewing)
         elsif recoverable_capability_review?
           ACTIONS.fetch(:plan_reviewing)
@@ -999,6 +1002,8 @@ module Hive
     # runnable. Invalid candidates and other terminal planner verdicts stay
     # operator-owned.
     def recoverable_transient_planner_revision?
+      return false if Hive::PlanDependencyCorrection.plan_review_exhausted?(plan_review)
+
       route = Array(plan_review["routes"]).reverse.find do |entry|
         entry["role"] == "planner_revision"
       end
@@ -1070,6 +1075,7 @@ module Hive
     # task's own `hive run` command, so a slug such as `fix-reviewer-…` must
     # not read as a reviewer repair.
     def unsupported_review?
+      return false if Hive::PlanDependencyCorrection.plan_review_exhausted?(plan_review)
       return false if Array(plan_review["blockers"]).any? do |blocker|
         blocker.is_a?(Hash) && blocker["reason"] == "revision_round_limit"
       end

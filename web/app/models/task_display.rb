@@ -20,7 +20,31 @@ class TaskDisplay
     return nil if state == "completed"
     return "Live status could not be confirmed. Actions are paused until it refreshes." unless @fresh
     if task["action"] == "admission_error"
-      return task.dig("admission_error", "safe_correction").presence || "Repair the task dependency before it can continue."
+      local_msg = task.dig("admission_error", "safe_correction").presence || "Repair the task dependency before it can continue."
+      roots = Array(task["dependency_repair_roots"])
+      return local_msg if roots.empty?
+
+      inherited = Hive::Dependencies.blocker_summary(
+        depends_on: task["depends_on"],
+        blocked_by: task["blocked_by"],
+        dependency_stage: task["dependency_stage"],
+        unmet_dependencies: task["unmet_dependencies"],
+        dependency_repair_roots: roots,
+        current_project: task.project&.name
+      )
+      return "#{local_msg} Also #{inherited}."
+    end
+    roots = Array(task["dependency_repair_roots"])
+    if roots.any?
+      summary = Hive::Dependencies.blocker_summary(
+        depends_on: task["depends_on"],
+        blocked_by: task["blocked_by"],
+        dependency_stage: task["dependency_stage"],
+        unmet_dependencies: task["unmet_dependencies"],
+        dependency_repair_roots: roots,
+        current_project: task.project&.name
+      )
+      return "#{summary.sub(/\A./, &:upcase)}."
     end
     blockers = Hive::Dependencies.blocker_names(
       unmet_dependencies: task["unmet_dependencies"], blocked_by: task["blocked_by"]
@@ -56,7 +80,7 @@ class TaskDisplay
         [ "attention", "Needs attention" ]
       elsif action == "admission_error"
         [ "attention", "Needs attention" ]
-      elsif task["blocked"] || task["blocked_by"].present?
+      elsif task["blocked"] || task["blocked_by"].present? || Array(task["dependency_repair_roots"]).any?
         [ "waiting", "Waiting on a task" ]
       elsif task["held"].present?
         [ "waiting", "Waiting for capacity" ]

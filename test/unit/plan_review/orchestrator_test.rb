@@ -476,19 +476,22 @@ class PlanReviewOrchestratorTest < Minitest::Test
   def test_candidate_promotion_adopts_a_dependency_added_by_the_revision
     revised = standard_plan.sub("files:", "depends_on: hivedev:base-task\nfiles:")
     with_task(standard_plan) do |task, cfg|
-      projection = orchestrator(
-        task, cfg,
-        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
-        planner_revision: FakeRevision.new(revised)
-      ).advance!
+      seed_prerequisite(task.project_root, "base-task", id: 10)
+      with_registered_hivedev(task.project_root) do
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: FakeRevision.new(revised)
+        ).advance!
 
-      assert_equal "cleared", projection.record.state
-      assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
-      assert_equal "hivedev:base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
-      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
-      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
-        task:, projection:, config: cfg
-      ).fetch("status")
+        assert_equal "cleared", projection.record.state
+        assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
+        assert_equal "hivedev:base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+        assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+          task:, projection:, config: cfg
+        ).fetch("status")
+      end
     end
   end
 
@@ -499,30 +502,212 @@ class PlanReviewOrchestratorTest < Minitest::Test
       "files:", "depends_on:\n  - hivedev:base-task\n  - other-task\nfiles:"
     )
     with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
-      projection = orchestrator(
-        task, cfg,
-        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
-        planner_revision: FakeRevision.new(revised)
-      ).advance!
+      seed_prerequisite(task.project_root, "base-task", id: 10)
+      seed_prerequisite(task.project_root, "other-task", id: 11)
+      with_registered_hivedev(task.project_root) do
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: FakeRevision.new(revised)
+        ).advance!
 
-      assert_equal "cleared", projection.record.state
-      assert_equal %w[hivedev:base-task other-task],
-                   YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
-      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+        assert_equal "cleared", projection.record.state
+        assert_equal %w[hivedev:base-task other-task],
+                     YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+      end
     end
   end
 
   def test_candidate_promotion_never_replaces_an_existing_meta_dependency
     revised = standard_plan.sub("files:", "depends_on: other-task\nfiles:")
     with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
-      projection = orchestrator(
-        task, cfg,
-        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
-        planner_revision: FakeRevision.new(revised)
-      ).advance!
+      seed_prerequisite(task.project_root, "base-task", id: 10)
+      seed_prerequisite(task.project_root, "other-task", id: 11)
+      with_registered_hivedev(task.project_root) do
+        revision = FakeRevision.new(revised)
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: revision
+        ).advance!
 
-      assert_equal "cleared", projection.record.state
-      assert_equal "base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert_equal "blocked", projection.record.state
+        refute projection.record.execution_allowed?
+        assert_equal 2, revision.calls.length
+        assert_includes revision.calls.last[:dependency_diagnostic].to_s, "plan_dependency_mismatch"
+        assert_equal "plan_dependency_correction_exhausted",
+                     projection.record["blockers"].first["reason"]
+        assert_equal "operator", projection.record["blockers"].first["owner"]
+        assert_equal standard_plan, File.binread(File.join(task.folder, "plan.md"))
+        assert_equal "base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+      end
+    end
+  end
+
+  def test_revision_invalid_dependency_gets_one_correction_then_adopts_and_preserves_identity
+    invalid_candidate = standard_plan.sub("files:", "depends_on:\n  - C4\n  - F2\nfiles:")
+    fixed_candidate = standard_plan.sub("files:", "depends_on:\n  - c4-base-task\n  - f2-next-task\nfiles:")
+    with_task(standard_plan) do |task, cfg|
+      seed_prerequisite(task.project_root, "c4-base-task", id: 10)
+      seed_prerequisite(task.project_root, "f2-next-task", id: 11)
+      with_registered_hivedev(task.project_root) do
+        calls = []
+        revision = Object.new
+        revision.define_singleton_method(:call) do |**args|
+          calls << args
+          bytes = calls.length == 1 ? invalid_candidate : fixed_candidate
+          Hive::PlanReview::PlannerRevision::Result.new(
+            outcome: "success", candidate_bytes: bytes,
+            candidate_digest: Digest::SHA256.hexdigest(bytes),
+            route_receipt: args.fetch(:planner_identity), diagnostic: nil
+          )
+        end
+
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: revision
+        ).advance!
+
+        assert_equal "cleared", projection.record.state
+        assert_equal 2, calls.length
+        assert_nil calls.first[:dependency_diagnostic]
+        assert_includes calls.last[:dependency_diagnostic], "C4"
+        assert_includes calls.last[:dependency_diagnostic], "F2"
+        assert_includes calls.last[:dependency_diagnostic], "c4-base-task"
+        assert_includes calls.last[:dependency_diagnostic], "f2-next-task"
+        assert_equal fixed_candidate, File.binread(File.join(task.folder, "plan.md"))
+        assert_equal %w[c4-base-task f2-next-task],
+                     YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+      end
+    end
+  end
+
+  def test_revision_unknown_target_exhausts_after_one_correction_without_mutating_plan_or_meta_or_retrying
+    bad_candidate = standard_plan.sub("files:", "depends_on: unknown-prereq\nfiles:")
+    with_task(standard_plan) do |task, cfg|
+      with_registered_hivedev(task.project_root) do
+        revision = FakeRevision.new(bad_candidate)
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: revision
+        ).advance!
+
+        assert_equal "blocked", projection.record.state
+        refute projection.record.execution_allowed?
+        assert_equal 2, revision.calls.length
+        assert_equal "plan_dependency_correction_exhausted",
+                     projection.record["blockers"].first["reason"]
+        assert_equal standard_plan, File.binread(File.join(task.folder, "plan.md"))
+        assert_nil YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert_empty projection.record["routes"].select { |r| r["transient_series_recovery"] }
+
+        # Re-entering orchestrator on the same exhausted review spawns zero additional revisions.
+        reentered = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: revision
+        ).advance!
+        assert_equal "blocked", reentered.record.state
+        assert_equal 2, revision.calls.length
+      end
+    end
+  end
+
+  def test_revision_environmental_failure_blocks_without_spending_correction
+    cross_candidate = standard_plan.sub("files:", "depends_on: missingproj:some-task\nfiles:")
+    with_task(standard_plan) do |task, cfg|
+      with_registered_hivedev(task.project_root) do
+        revision = FakeRevision.new(cross_candidate)
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: revision
+        ).advance!
+
+        assert_equal "blocked", projection.record.state
+        refute projection.record.execution_allowed?
+        assert_equal 1, revision.calls.length
+        assert_equal "dependency_project_unknown",
+                     projection.record["blockers"].first["reason"]
+        assert_equal standard_plan, File.binread(File.join(task.folder, "plan.md"))
+        refute File.exist?(Hive::PlanDependencyCorrection.path(task.folder))
+      end
+    end
+  end
+
+  def test_direct_clearance_paths_refuse_invalid_existing_plan_for_skipped_cleared_and_degraded
+    invalid_skip = skip_plan.sub("files:", "depends_on:\n  - F2\n  - F3\nfiles:")
+    with_task(invalid_skip) do |task, cfg|
+      with_registered_hivedev(task.project_root) do
+        projection = orchestrator(task, cfg, adapter: success_adapter).advance!
+        assert_equal "blocked", projection.record.state
+        refute projection.record.execution_allowed?
+        assert_equal "plan_dependency_invalid", projection.record["blockers"].first["reason"]
+        assert_equal invalid_skip, File.binread(File.join(task.folder, "plan.md"))
+        assert_nil YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+      end
+    end
+
+    invalid_standard = standard_plan.sub("files:", "depends_on: F2\nfiles:")
+    with_task(invalid_standard) do |task, cfg|
+      with_registered_hivedev(task.project_root) do
+        projection = orchestrator(task, cfg, adapter: success_adapter).advance!
+        assert_equal "blocked", projection.record.state
+        refute projection.record.execution_allowed?
+        assert_equal "plan_dependency_invalid", projection.record["blockers"].first["reason"]
+      end
+    end
+
+    with_task(invalid_standard) do |task, cfg|
+      with_registered_hivedev(task.project_root) do
+        degraded_adapter = FakeAdapter.new do |request|
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "unsupported",
+            findings: [],
+            coverage: request.required_coverage.map { |name| { "name" => name, "status" => "missing" } },
+            route_receipt: { "actual" => request.reviewer, "capability_result" => "unsupported" },
+            diagnostic: "missing reviewer"
+          )
+        end
+        projection = orchestrator(task, cfg, adapter: degraded_adapter).advance!
+        assert_equal "blocked", projection.record.state
+        refute projection.record.execution_allowed?
+        assert_equal "plan_dependency_invalid", projection.record["blockers"].first["reason"]
+      end
+    end
+  end
+
+  def test_clearance_custody_rejects_stale_rewrite_and_restores_canonical_plan
+    revised = standard_plan.sub("files:", "depends_on: base-task\nfiles:")
+    with_task(standard_plan) do |task, cfg|
+      seed_prerequisite(task.project_root, "base-task", id: 10)
+      with_registered_hivedev(task.project_root) do
+        stale_result = Struct.new(:stale?).new(true)
+        original_rewrite = Hive::TaskMeta.method(:rewrite)
+        stub_rewrite = lambda do |folder, updates, **kwargs|
+          if updates.key?(:depends_on)
+            stale_result
+          else
+            original_rewrite.call(folder, updates, **kwargs)
+          end
+        end
+
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stub_rewrite) do
+          projection = orchestrator(
+            task, cfg,
+            adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+            planner_revision: FakeRevision.new(revised)
+          ).advance!
+
+          refute projection.record.execution_allowed?
+          assert_equal standard_plan, File.binread(File.join(task.folder, "plan.md"))
+          assert_nil YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        end
+      end
     end
   end
 
@@ -2791,6 +2976,24 @@ class PlanReviewOrchestratorTest < Minitest::Test
       },
       "lifecycle" => "open", "display_order" => line
     )
+  end
+
+  def seed_prerequisite(project_root, slug, id:, stage: "8-finalize")
+    folder = File.join(project_root, ".hive-state", "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: id, slug: slug, display_name: slug)
+    folder
+  end
+
+  def with_registered_hivedev(project_root, repository_identity: "github.com/acme/hivedev")
+    registry = [
+      { "name" => "hivedev", "path" => project_root, "repository_identity" => repository_identity }
+    ]
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { registry }) do
+      with_replaced_singleton_method(Hive::RepositoryIdentity, :current, ->(_) { repository_identity }) do
+        yield
+      end
+    end
   end
 
   def with_task(plan, meta_depends_on: nil, shipped_defaults: false)

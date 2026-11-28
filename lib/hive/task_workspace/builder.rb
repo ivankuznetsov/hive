@@ -351,6 +351,33 @@ module Hive
             "explanation" => summary
           }
         end
+        if task_value("action").to_s == "admission_error" && task_value("admission_error").is_a?(Hash)
+          error = task_value("admission_error")
+          explanation = safe_workspace_dependency_text(error["safe_correction"], 4 * 1024)
+          return {
+            "state" => "needs_attention",
+            "label" => "Admission error",
+            "explanation" => explanation.empty? ? "Repair the task dependency before it can continue." : explanation
+          }
+        end
+        if task_value("blocked") == true && Array(task_value("dependency_repair_roots")).any?
+          explanation = safe_workspace_dependency_text(
+            Hive::Dependencies.blocker_summary(
+              depends_on: task_value("depends_on"),
+              blocked_by: task_value("blocked_by"),
+              dependency_stage: task_value("dependency_stage"),
+              unmet_dependencies: task_value("unmet_dependencies"),
+              dependency_repair_roots: task_value("dependency_repair_roots"),
+              current_project: @project
+            ),
+            4 * 1024
+          )
+          return {
+            "state" => "waiting",
+            "label" => "Waiting on dependency",
+            "explanation" => explanation
+          }
+        end
         if status["freshness"] != "fresh" || status["state"] != "current"
           return {
             "state" => "unavailable", "label" => "Current state unavailable",
@@ -366,13 +393,18 @@ module Hive
 
       def semantic_diagnostic(projection)
         summary = semantic_diagnostic_summary
-        return {
-          "state" => "not_applicable", "summary" => nil,
-          "log" => { "state" => "unavailable", "quality" => nil, "reference" => nil }
-        } unless summary
+        roots = safe_semantic_repair_roots(task_value("dependency_repair_roots"))
+        if summary.nil?
+          result = {
+            "state" => "not_applicable", "summary" => nil,
+            "log" => { "state" => "unavailable", "quality" => nil, "reference" => nil }
+          }
+          result["dependency_repair_roots"] = roots unless roots.empty?
+          return result
+        end
 
         reference = correlated_log_reference(projection)
-        {
+        result = {
           "state" => "current", "summary" => summary,
           "log" => {
             "state" => reference ? "current" : "unavailable",
@@ -380,6 +412,52 @@ module Hive
             "reference" => reference
           }
         }
+        result["dependency_repair_roots"] = roots unless roots.empty?
+        result
+      end
+
+      def safe_semantic_repair_roots(roots)
+        Array(roots).first(64).filter_map do |root|
+          next unless root.is_a?(Hash)
+
+          {
+            "project" => root["project"].to_s[0, 255],
+            "slug" => root["slug"].to_s[0, 255],
+            "reason_code" => root["reason_code"].to_s,
+            "offending_ref" => safe_workspace_dependency_text(root["offending_ref"], 1024),
+            "safe_correction" => safe_workspace_dependency_text(root["safe_correction"], 2048),
+            "issues" => Array(root["issues"]).first(128).filter_map do |issue|
+              next unless issue.is_a?(Hash)
+
+              {
+                "index" => issue["index"].is_a?(Integer) && issue["index"] >= 0 ? issue["index"] : nil,
+                "raw_value" => safe_workspace_dependency_value(issue["raw_value"]),
+                "display_value" => safe_workspace_dependency_text(issue["display_value"], 512),
+                "code" => issue["code"].to_s[0, 64],
+                "message" => safe_workspace_dependency_text(issue["message"], 512),
+                "suggestion" => issue["suggestion"].nil? ? nil : safe_workspace_dependency_text(issue["suggestion"], 255)
+              }
+            end
+          }
+        end
+      end
+
+      def safe_workspace_dependency_text(value, limit)
+        text = Hive::SecretPatterns.redact(value.to_s)
+        text = text.gsub(%r{(?:[A-Za-z]:[\\/]|/)\S*/(plan\.md|meta\.yml)\b}, '\1')
+        text = text.gsub(%r{\A/+}, "")
+        text = text.gsub(%r{(?:^|[\\/])\.\.(?:[\\/]|$)}, "/")
+        text[0, limit]
+      end
+
+      def safe_workspace_dependency_value(value)
+        case value
+        when String then safe_workspace_dependency_text(value, 512)
+        when Array then value.first(32).map { |child| safe_workspace_dependency_value(child) }
+        when Hash then value.first(32).to_h { |k, v| [ safe_workspace_dependency_text(k, 64), safe_workspace_dependency_value(v) ] }
+        when Numeric, TrueClass, FalseClass, NilClass then value
+        else safe_workspace_dependency_text(value, 512)
+        end
       end
 
       def semantic_diagnostic_summary

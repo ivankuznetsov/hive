@@ -4298,7 +4298,7 @@ module Hive
             )
             return result
           end
-          if result.status == :blocked
+          if result.status == :blocked && result.attempt.nil?
             record_internal_pr_reopen_backoff(req, reason: result.reason, now: now)
             dispatch_repository.release_claim(
               req.request_id, state_home: dispatch_request_state_home

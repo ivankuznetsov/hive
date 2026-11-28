@@ -346,3 +346,33 @@ Recovery recipes refresh operational status and select only the intended task's
 current `workflow.retry` action. An ineligible action stops the recipe; it cannot
 advance a stage. Draft readiness is conditional on publication, exact-head
 verification and a current secret scan; normal finalize remains the default.
+
+## Internal PR review separation
+
+`Hive::ReviewFastForwardAdoption#adopt!` and
+`Hive::ReviewBaseMergeAdoption#adopt!` apply only to ordinary publishable task
+PRs; both return `nil` immediately before any side effects for U2-applicable
+internal PR reviews (`source: ad-hoc`). Internal PR head changes are owned
+exclusively by `Hive::InternalPrCheckout` (see [[stages/review]] and
+[[state-model]]).
+
+- **Local-only publication.** For internal PR reviews, `Review::Publication#publish!`,
+  `Review#publish_review_head`, and `Review::GithubPublisher.publish!` are
+  non-applicable no-ops (`"not_applicable"` / `:not_applicable`) with zero
+  `git push`, zero `gh pr comment`, and zero `github-publication.json` writes,
+  even when `review.adhoc.fix` is enabled. Ordinary publishable tasks retain
+  their full leased push, secret scanning, and generation-scoped comment
+  deduplication (`(review generation G)` for `G > 1`, bare header for gen 1).
+- **RecoveryCoordinator parity.** Under its task lease,
+  `RecoveryCoordinator#resume` reconciles an applicable internal PR review
+  before deciding whether to clear any failure marker: `current` preserves the
+  exact compared `REVIEW_ERROR`/`REVIEW_CI_STALE` clear and same-head retry;
+  `reopened` supersedes the old recovery request with `generation_conflict` so
+  a fresh generation starts without old predecessors or inherited outputs;
+  `busy` and `blocked` never clear markers.
+- **Internal `base_conflict` guidance.** When hosted CI reports a base conflict
+  on an internal PR review, `reviews/ci-blocked.md` directs resolving conflicts
+  on the source PR and explicitly reopening the updated head (and reports any
+  unproven local 2-parent merge commit OID for operator preservation before
+  restoring a verified checkout), leaving ordinary base-merge adoption guidance
+  intact for publishable task branches.

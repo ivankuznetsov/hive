@@ -139,8 +139,12 @@ module Hive
 
         pr_path = File.join(folder, "pr.md")
         return true if frontmatter_source_adhoc?(pr_path)
-        return true if frontmatter_source_adhoc?(File.join(folder, "task.md"))
-        return true if frontmatter_source_adhoc?(File.join(folder, "idea.md"))
+
+        slug = task.respond_to?(:slug) ? task.slug.to_s : File.basename(folder)
+        if slug.match?(SLUG_PATTERN) || File.exist?(pr_path) || File.symlink?(pr_path)
+          return true if frontmatter_source_adhoc?(File.join(folder, "task.md"))
+          return true if frontmatter_source_adhoc?(File.join(folder, "idea.md"))
+        end
 
         false
       rescue StandardError
@@ -150,13 +154,30 @@ module Hive
         slug.match?(SLUG_PATTERN)
       end
 
+      def project_name_for(project_root, task: nil)
+        expanded = File.expand_path(project_root.to_s)
+        registered = begin
+          Hive::Config.registered_projects.find do |entry|
+            entry.is_a?(Hash) && !entry["path"].to_s.empty? &&
+              File.expand_path(entry["path"].to_s) == expanded
+          end
+        rescue StandardError
+          nil
+        end
+        name = registered&.fetch("name", nil).to_s
+        return name unless name.empty?
+
+        fallback = task.respond_to?(:project_name) ? task.project_name.to_s : ""
+        fallback.empty? ? File.basename(expanded) : fallback
+      end
+
       # Strictly validate and derive expected local/remote targets for an
       # applicable internal PR review task. Raises InternalPrCheckout::Error
       # with closed R2 reason codes on any violation.
       def resolve!(task, config: nil, allow_legacy_head_ref_oid: true, allow_local_transport: nil)
         folder = File.expand_path(task.folder.to_s)
         project_root = File.expand_path(task.project_root.to_s)
-        project_name = task.respond_to?(:project_name) ? task.project_name.to_s : File.basename(project_root)
+        project_name = project_name_for(project_root, task: task)
         slug = task.slug.to_s
         task_id = task.respond_to?(:id) ? task.id&.to_s : nil
         cfg = config || Hive::Config.load(project_root)

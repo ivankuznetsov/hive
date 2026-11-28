@@ -1,9 +1,9 @@
 ---
 title: 6-review stage
 type: stage
-source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,remote_ci,triage,browser_test,fix_guardrail,suppression,pass_archive,limit_fallback}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
+source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,remote_ci,triage,browser_test,fix_guardrail,suppression,pass_archive,limit_fallback}.rb, lib/hive/commands/adhoc_review.rb, lib/hive/internal_pr_checkout.rb, lib/hive/internal_pr_checkout/*, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-11-20
+updated: 2026-11-28
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -418,3 +418,65 @@ Accepted findings or escalations after the final fix leave a published
 That reason is always operator-owned, even without an escalations file: locally
 commit fixes before explicit coordinator retry. Checkbox edits alone do not apply
 fixes; explicitly increasing `review.max_passes` changes the repair budget.
+
+## Internal PR review checkout reconciliation
+
+Internal PR reviews (`source: ad-hoc` tasks in `6-review`) use one durable domain
+authority, `Hive::InternalPrCheckout` (`lib/hive/internal_pr_checkout/`), for
+every existing-task reopen. `Hive::Commands::AdhocReview` owns initial creation
+under the project commit lock and delegates existing-task reuse to this domain.
+
+- **Explicit reopen vs. local continuation.** Human `hive review --pr`, human
+  task-target `review`/`run`, explicit `workflow.retry`, and queued explicit
+  reopens pass `mode: :explicit_reopen` and observe canonical PR metadata and
+  the exact remote head within one shared monotonic network deadline. Workers,
+  automatic continuations, retry-ladder admissions, and healers run
+  `mode: :local_verify` with zero provider I/O; when fresh provider evidence is
+  required, they defer with retryable `blocked/remote_observation_required`.
+- **Unchanged vs. changed head.** An unchanged head returns `current/head_unchanged`
+  as a zero-write no-op on task files and Git state (legacy implicit generation 1
+  tasks with consistent bindings stay unmodified). A changed head fetches the
+  exact OID into a transaction-scoped quarantine ref, confirms the PR head at the
+  final provider observation (linearization point), retires the active review
+  generation once through `PassArchive.retire!` with a transaction-bound label
+  and `internal_pr_head_changed` grant expiry, archives remaining head-bound
+  artifacts (including `reviews/` subdirectories and task-root
+  `github-publication.json`) into `reviews/archive/<label>/`, selectively strips
+  only recognized `REVIEW_*` markers (including embedded/shadowed markers) under
+  `Markers.with_markers_lock` while preserving `MANUAL_STEERING`, frontmatter,
+  and operator prose byte for byte, projects canonical `pr.md` (`head_oid` +
+  continuously valid `pr_url`) and `worktree.yml` (`execute_base_head`), and
+  publishes `current.json` last.
+- **Shared generation ordinal and A-to-B-to-A.** `PassArchive` remains the single
+  ordinal allocator across internal-PR head transitions, rewinds, and adoptions.
+  Returning to a prior OID (A -> B -> A) allocates ordinals 1, 2, and 3 and starts
+  a fresh pass each time; archived generations remain auditable under
+  `reviews/archive/` and never match active flat pass globs.
+- **`MANUAL_STEERING` hold.** An active `MANUAL_STEERING` marker stops both
+  reconciliation (`busy/manual_steering`, zero checkout writes or admissions) and
+  locked `Review.run!` preflight before budget, marker, or settled-PR shortcuts.
+- **Generation-scoped settled-PR preflight.** For applicable internal PR tasks,
+  `Review#settled_pull_request_result` binds to U2's coherent snapshot and uses
+  the explicit reopen's bound PR observation, the confirmed snapshot observation,
+  or a newer `PullRequestOutcome.latest_for_generation` watcher record bound to
+  the exact PR URL, `reviewed_oid`, and `generation`. Older URL-only observations
+  from prior heads are ignored; currently merged or closed heads still stop
+  before every agent.
+- **Local-only internal publication and read-only target proof.**
+  `GithubPublisher.validated_pr_url` factors read-only canonical proof for
+  internal PRs (`hive/review/pr-N`, canonical host/repo/number/URL/source-or-fork
+  identity, and exact `reviewed_oid`; a different remote `headRefName` or fork
+  branch is valid). At the actual comment and fix-publish entrypoints
+  (`GithubPublisher.publish!`, `Review::Publication#publish!`, and
+  `Review#publish_review_head`), internal PR reviews are strictly local-only
+  (`:not_applicable` / `"not_applicable"`, zero `gh pr comment`, zero `git push`,
+  zero `github-publication.json`), even when `review.adhoc.fix` is enabled.
+- **Rebase and conflict recovery.** Continuously preserving canonical `pr_url`
+  keeps both `Hive::Rebase.perform` and `hive rebase-status` on
+  `published_review_branch`. `RemoteCi` `base_conflict` guidance for internal
+  reviews directs resolving conflicts on the source PR and explicitly reopening
+  the updated head (reporting any unproven local 2-parent merge OID for
+  preservation before restoring a verified checkout). Ordinary
+  `ReviewFastForwardAdoption` and `ReviewBaseMergeAdoption` decline applicable
+  internal PR reviews and retain their existing behavior for publishable tasks
+  (see [[publication-recovery]]).

@@ -1,9 +1,9 @@
 ---
 title: Hive::Worktree
 type: module
-source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
+source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb, lib/hive/internal_pr_checkout/git_transition.rb
 created: 2026-04-25
-updated: 2026-11-07
+updated: 2026-11-28
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -223,6 +223,33 @@ pointer, or different repository fails closed.
 `Hive::Stages::Base.worktree_pointer_or_exit` shares this policy across
 open-PR, review, and finalize; execute continuation and the healer use it
 directly.
+
+For applicable internal PR reviews (`source: ad-hoc`), `read_owned_pointer`
+accepts explicit `expected_path:` and `expected_branch:` derived independently
+from validated task identity (`<worktree_root>/adhoc-review-pr-N` and
+`hive/review/pr-N`). Ordinary coding tasks continue to default to the slug
+branch. `Hive::InternalPrCheckout::GitTransition` routes every fetch, ref move,
+and checkout through `Hive::AgentGitGate` with safe repository-config checks:
+
+- **Transaction-scoped quarantine fetch.** Pending intent persists the expected
+  temporary ref (`refs/hive/internal-pr-checkout/tx/<tx-id>`) and remote
+  fingerprint before `AgentGitGate.fetch_pull_request_commit` fetches
+  `+refs/pull/<n>/head` and verifies the exact full OID.
+- **Clean candidate preservation.** Before moving `hive/review/pr-N` away from a
+  clean controller-proven local fix commit (`candidate.json` bound to task, PR,
+  generation, and reviewed OID with verified ancestry), Hive writes an immutable
+  generation archive ref
+  (`refs/hive/internal-pr-checkout/candidates/pr-N/gen-G-<tx-id>`) so the commit
+  remains reachable. Dirty worktrees, detached HEADs, and unexplained commits
+  block (`checkout_dirty`, `checkout_detached`, `candidate_unproven`,
+  `checkout_diverged`) without resetting the branch.
+- **No-overwrite-ignore and interrupted checkout recovery.** Before updating the
+  branch and tree, pending intent records the old branch/ref, both tracked trees,
+  index identity, and transaction-owned temporary paths. Materialization and
+  rollback preserve unrelated ignored build output, refuse ignored-path
+  obstructions in both directions without overwriting their bytes, use
+  expected-OID ref moves, and refuse third-state tracked edits, non-ignored
+  untracked files, or unexplained Git locks (`git_residue_unverifiable`).
 
 The strict reader uses a bounded owner-side no-follow read and additionally
 rejects symlinks, oversized input, malformed or duplicate fields, out-of-root

@@ -1198,7 +1198,7 @@ module Hive
       def validate_pending_against_task!(task, pending:, store:, config:)
         slug = safe_task_slug(task)
         task_id = safe_task_id(task)
-        project_name = task.respond_to?(:project_name) ? task.project_name.to_s : File.basename(task.project_root.to_s)
+        project_name = Identity.project_name_for(task.project_root, task: task)
         pr_number = pending.fetch("pr_number")
         expected_slug = Identity.slug_for(pr_number)
         expected_branch = Identity.branch_for(pr_number)

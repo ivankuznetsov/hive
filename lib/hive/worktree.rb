@@ -484,9 +484,7 @@ module Hive
         end
         value
       end
-      keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
-      duplicates = keys.tally.select { |_key, count| count > 1 }.keys
-      raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+      reject_duplicate_yaml_keys!(source)
 
       raw = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false)
       raise WorktreeError, "worktree.yml must be a hash" unless raw.is_a?(Hash)
@@ -530,7 +528,8 @@ module Hive
     # that branch checked out. Older coding pointers do not carry the strict
     # draft-PR receipt fields, so these live repository checks provide the
     # equivalent ownership proof without breaking their recovery.
-    def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:)
+    def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:,
+                                expected_path: nil, expected_branch: nil)
       pointer_path = File.join(task_folder, "worktree.yml")
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
@@ -541,9 +540,7 @@ module Hive
 
         value
       end
-      keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
-      duplicates = keys.tally.select { |_key, count| count > 1 }.keys
-      raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+      reject_duplicate_yaml_keys!(source)
 
       raw = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false)
       raise WorktreeError, "worktree.yml must be a hash" unless raw.is_a?(Hash)
@@ -551,11 +548,29 @@ module Hive
       raise WorktreeError, "worktree.yml is missing keys: #{missing.join(', ')}" unless missing.empty?
 
       root = realpath_or_expand(expected_root)
-      expected_path = realpath_or_expand(File.join(root, slug.to_s))
-      path = validate_pointer_path(raw["path"], root)
+      expected_target_path = if expected_path
+        validate_pointer_path(expected_path, root)
+      else
+        realpath_or_expand(File.join(root, slug.to_s))
+      end
+      expected_target_branch = if expected_branch
+        validate_branch_name!(expected_branch)
+      else
+        slug.to_s
+      end
+      raw_path = raw["path"].to_s
+      raise WorktreeError, "worktree.yml path is invalid" if raw_path.empty? || raw_path.match?(/[\0\r\n]/)
+      if File.symlink?(File.expand_path(raw_path))
+        raise WorktreeError, "worktree #{raw_path} must be a real directory, not a symlink"
+      end
+
+      path = validate_pointer_path(raw_path, root)
+      if File.symlink?(path)
+        raise WorktreeError, "worktree #{path} must be a real directory, not a symlink"
+      end
       branch = validate_branch_name!(raw["branch"])
-      raise WorktreeError, "worktree.yml path does not belong to task #{slug}" unless path == expected_path
-      raise WorktreeError, "worktree.yml branch does not belong to task #{slug}" unless branch == slug.to_s
+      raise WorktreeError, "worktree.yml path does not belong to task #{slug}" unless path == expected_target_path
+      raise WorktreeError, "worktree.yml branch does not belong to task #{slug}" unless branch == expected_target_branch
       raise WorktreeError, "worktree #{path} is missing" unless File.directory?(path)
 
       registered = run_materialize_git!(project_root, "worktree", "list", "--porcelain")
@@ -743,6 +758,38 @@ module Hive
       realpath_or_expand(File.expand_path(value, path))
     end
     private_class_method :git_common_dir
+
+    def self.reject_duplicate_yaml_keys!(source)
+      keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
+      duplicates = keys.tally.select { |_key, count| count > 1 }.keys
+      raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+
+      tree = Psych.parse(source)
+      return unless tree
+
+      find_duplicate_yaml_mapping_keys!(tree)
+    end
+    private_class_method :reject_duplicate_yaml_keys!
+
+    def self.find_duplicate_yaml_mapping_keys!(node)
+      return unless node.respond_to?(:children) && node.children
+
+      if node.is_a?(Psych::Nodes::Mapping)
+        seen = {}
+        node.children.each_slice(2) do |key_node, value_node|
+          raise WorktreeError, "worktree.yml keys must be scalars" unless key_node.is_a?(Psych::Nodes::Scalar)
+
+          key = key_node.value.to_s
+          raise WorktreeError, "worktree.yml contains duplicate keys: #{key}" if seen.key?(key)
+
+          seen[key] = true
+          find_duplicate_yaml_mapping_keys!(value_node)
+        end
+      else
+        node.children.each { |child| find_duplicate_yaml_mapping_keys!(child) }
+      end
+    end
+    private_class_method :find_duplicate_yaml_mapping_keys!
 
     # Run one `git -C <dir>` command for the materialize path and return its
     # stdout. `dir` is the directory git runs in — the repo root for fetch /

@@ -1908,6 +1908,133 @@ def test_origin_push_url_transport_failure_uses_stdout_when_stderr_is_blank
   end
 end
 
+def test_validated_pr_metadata_enforces_identity_head_oid_fork_and_shared_deadline
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  full_oid = "a" * 40
+  calls = []
+  times = [ 10.0, 10.5 ]
+  payload = {
+    "number" => 42,
+    "url" => "https://GitHub.com/Acme/App/pull/42",
+    "baseRefName" => "main",
+    "headRefName" => "contrib/fix-bug",
+    "headRefOid" => full_oid.upcase,
+    "headRepository" => { "name" => "app" },
+    "headRepositoryOwner" => { "login" => "Contributor" },
+    "isCrossRepository" => true,
+    "state" => "open",
+    "isDraft" => false
+  }
+  with_replaced_singleton_method(Hive::Gh, :monotonic_now, -> { times.shift || 10.5 }) do
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+      calls << [ cmd, kwargs ]
+      cmd[1] == "auth" ? [ "", "", ok ] : [ JSON.generate(payload), "", ok ]
+    }) do
+      meta = Hive::Gh.validated_pr_metadata(
+        42,
+        expected_host: "github.com",
+        expected_repository: "acme/app",
+        chdir: "/tmp/project",
+        deadline: 15.0
+      )
+      assert_equal 42, meta.number
+      assert_equal "https://github.com/acme/app/pull/42", meta.url
+      assert_equal "github.com", meta.host
+      assert_equal "acme/app", meta.repository
+      assert_equal full_oid, meta.head_ref_oid
+      assert_equal "OPEN", meta.state
+      assert_equal "contrib/fix-bug", meta.head_ref_name
+      assert_equal "contributor/app", meta.head_repository
+      assert_equal true, meta.is_cross_repository
+    end
+  end
+
+  assert_equal 2, calls.length
+  assert_in_delta 5.0, calls.first.last.fetch(:timeout_sec), 0.001
+  assert_in_delta 4.5, calls.last.last.fetch(:timeout_sec), 0.001
+  assert_includes calls.last.first, "--repo"
+  assert_includes calls.last.first, "github.com/acme/app"
+end
+
+def test_validated_pr_metadata_rejects_malformed_oid_mismatches_and_expired_deadline
+  full_oid = "a" * 40
+  base = Hive::Gh::PrMetadata.new(
+    number: 42,
+    url: "https://github.com/acme/app/pull/42",
+    base_ref_name: "main",
+    head_ref_oid: full_oid,
+    is_cross_repository: false,
+    state: "OPEN",
+    head_ref_name: "feat/x",
+    head_repository: "acme/app"
+  )
+
+  # Malformed/empty OID, wrong repo, wrong host, invalid state, contradictory head repo
+  [
+    base.with(head_ref_oid: ""),
+    base.with(head_ref_oid: "abc1234"),
+    base.with(url: "https://github.com/other/app/pull/42"),
+    base.with(url: "https://ghe.example/acme/app/pull/42"),
+    base.with(number: 43),
+    base.with(state: "UNKNOWN"),
+    base.with(is_cross_repository: false, head_repository: "fork/app")
+  ].each do |invalid|
+    assert_raises(Hive::GhError) do
+      Hive::Gh.validate_pr_metadata!(
+        invalid,
+        expected_number: 42,
+        expected_host: "github.com",
+        expected_repository: "acme/app"
+      )
+    end
+  end
+
+  with_replaced_singleton_method(Hive::Gh, :monotonic_now, -> { 20.0 }) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.validated_pr_metadata(
+        42, expected_host: "github.com", expected_repository: "acme/app", deadline: 19.0
+      )
+    end
+    assert_match(/deadline/, error.message)
+  end
+end
+
+def test_read_pr_head_oid_and_persist_pr_identity_canonicalize_legacy_head_ref_oid
+  oid_a = "a" * 40
+  oid_b = "b" * 40
+
+  assert_nil Hive::Gh.read_pr_head_oid({ "head_ref_oid" => oid_a }, allow_legacy: false)
+  assert_equal oid_a, Hive::Gh.read_pr_head_oid({ "head_ref_oid" => oid_a }, allow_legacy: true)
+  assert_equal oid_b, Hive::Gh.read_pr_head_oid({ "head_oid" => oid_b }, allow_legacy: false)
+  assert_raises(Hive::GhError) do
+    Hive::Gh.read_pr_head_oid({ "head_oid" => oid_a, "head_ref_oid" => oid_b }, allow_legacy: true)
+  end
+
+  with_tmp_dir do |dir|
+    path = File.join(dir, "pr.md")
+    File.write(
+      path,
+      "---\npr_url: https://github.com/acme/app/pull/42\npr_number: 42\n" \
+      "head_ref_oid: #{oid_a}\nsource: ad-hoc\nstate: OPEN\n---\n\nOperator prose\n"
+    )
+    Hive::Gh.persist_pr_identity!(
+      path,
+      pr_url: "https://github.com/acme/app/pull/42",
+      pr_number: 42,
+      head_oid: oid_b,
+      attributes: { "state" => "OPEN", "base_ref_name" => "main" }
+    )
+    raw = File.read(path)
+    assert_equal 1, raw.scan(/^head_oid:/).length
+    refute_match(/^head_ref_oid:/, raw)
+    frontmatter = Hive::Gh.pr_frontmatter(path)
+    assert_equal oid_b, frontmatter["head_oid"]
+    assert_equal "ad-hoc", frontmatter["source"]
+    assert_equal "main", frontmatter["base_ref_name"]
+    assert_includes raw, "Operator prose"
+  end
+end
+
 private
 
 def refactor_patrol_github

@@ -12,8 +12,9 @@ module Hive
     TERMINATION_GRACE_SEC = 0.1
     GH_BIN_ENV = "HIVE_GH_BIN"
     COMMANDS = %w[
-      cat-file diff fetch ls-remote merge merge-base push remote rev-list
-      rev-parse show status symbolic-ref worktree
+      cat-file checkout checkout-index diff fetch ls-files ls-remote ls-tree
+      merge merge-base push read-tree remote rev-list rev-parse show status
+      symbolic-ref update-ref worktree
     ].freeze
     CONFIG = [
       "core.hooksPath=/dev/null",

@@ -69,6 +69,13 @@ class ManagedGitTest < Minitest::Test
     assert_raises(ArgumentError) do
       Hive::ManagedGit.command("/tmp/repo", "config", "alias.escape", "!sh")
     end
+    assert_raises(ArgumentError) do
+      Hive::ManagedGit.command("/tmp/repo", "gc")
+    end
+    %w[checkout checkout-index ls-files ls-tree read-tree update-ref].each do |cmd|
+      argv = Hive::ManagedGit.command("/tmp/repo", cmd)
+      assert_equal cmd, argv.last
+    end
   end
 
   def test_absolute_gh_binary_is_embedded_in_credential_helper

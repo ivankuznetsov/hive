@@ -1050,6 +1050,203 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_fetch_pull_request_commit_quarantines_exact_oid_without_ref_or_fetch_head_side_effects
+    with_local_remote do |repo, remote|
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "remote", "add", "origin", remote)
+      run!("git", "-C", repo, "push", "--quiet", remote, "#{base}:refs/heads/main")
+      run!("git", "-C", repo, "checkout", "--quiet", "-b", "scratch-pr")
+      pr_oid = commit_file(repo, "pr.txt", "pr head\n", "pr head")
+      run!("git", "-C", repo, "push", "--quiet", remote, "#{pr_oid}:refs/pull/42/head")
+      run!("git", "-C", repo, "checkout", "--quiet", "master")
+      run!("git", "-C", repo, "branch", "-D", "scratch-pr")
+
+      # Use a fresh clone that lacks pr_oid locally, then add a remote tag
+      # afterwards to prove --no-tags skips fetching tags.
+      Dir.mktmpdir("agent-git-pr-clone") do |root|
+        clone = File.join(root, "clone")
+        run!("git", "clone", "--quiet", remote, clone)
+        run!("git", "-C", remote, "tag", "v-remote-pr", pr_oid)
+        fetch_head = File.join(clone, ".git", "FETCH_HEAD")
+        FileUtils.rm_f(fetch_head)
+        refs_before = run!("git", "-C", clone, "for-each-ref", "--format=%(refname) %(objectname)").lines.sort
+
+        observed = Hive::AgentGitGate.observe_pull_request_head(
+          repository_path: clone, pr_number: 42, remote: "origin", allow_local_transport: true
+        )
+        assert observed.present?
+        assert_equal pr_oid, observed.oid
+        assert_equal "refs/pull/42/head", observed.ref
+
+        qref = "refs/hive/internal-pr-checkout/tx/tx-01"
+        receipt = Hive::AgentGitGate.fetch_pull_request_commit(
+          repository_path: clone,
+          pr_number: 42,
+          expected_oid: pr_oid,
+          quarantine_ref: qref,
+          remote: "origin",
+          expected_remote_fingerprint: observed.remote_fingerprint,
+          allow_local_transport: true
+        )
+
+        assert_equal pr_oid, receipt.oid
+        assert_equal qref, receipt.quarantine_ref
+        refute File.exist?(fetch_head), "quarantined fetch must not write FETCH_HEAD"
+        assert_equal "", run!("git", "-C", clone, "tag", "-l", "v-remote-pr").strip
+        refs_after = run!("git", "-C", clone, "for-each-ref", "--format=%(refname) %(objectname)").lines.sort
+        assert_equal [ "#{qref} #{pr_oid}\n" ], refs_after - refs_before
+
+        # Installing the same quarantine ref again fails because it is no longer absent.
+        assert_raises(Hive::AgentGitGate::RemoteConflict) do
+          Hive::AgentGitGate.fetch_pull_request_commit(
+            repository_path: clone,
+            pr_number: 42,
+            expected_oid: pr_oid,
+            quarantine_ref: qref,
+            remote: "origin",
+            allow_local_transport: true
+          )
+        end
+
+        # Expected-OID cleanup removes only a matching quarantine ref.
+        assert_raises(Hive::AgentGitGate::RemoteConflict) do
+          Hive::AgentGitGate.delete_ref_if_matches(
+            repository_path: clone, ref: qref, expected_oid: base
+          )
+        end
+        assert_equal :deleted, Hive::AgentGitGate.delete_ref_if_matches(
+          repository_path: clone, ref: qref, expected_oid: pr_oid
+        )
+        assert_equal :absent, Hive::AgentGitGate.delete_ref_if_matches(
+          repository_path: clone, ref: qref, expected_oid: pr_oid
+        )
+      end
+    end
+  end
+
+  def test_fetch_pull_request_commit_fails_closed_on_race_config_transport_fingerprint_and_deadline
+    with_local_remote do |repo, remote|
+      run!("git", "-C", repo, "remote", "add", "origin", remote)
+      oid_a = commit_file(repo, "a.txt", "a\n", "a")
+      oid_b = commit_file(repo, "b.txt", "b\n", "b")
+      run!("git", "-C", repo, "push", "--quiet", remote, "#{oid_b}:refs/pull/7/head")
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", oid_a)
+      qref = "refs/hive/internal-pr-checkout/tx/tx-race"
+
+      # Remote head differs from expected metadata OID -> RemoteConflict, no quarantine ref or HEAD move.
+      assert_raises(Hive::AgentGitGate::RemoteConflict) do
+        Hive::AgentGitGate.fetch_pull_request_commit(
+          repository_path: repo, pr_number: 7, expected_oid: oid_a,
+          quarantine_ref: qref, remote: "origin", allow_local_transport: true
+        )
+      end
+      refute Hive::AgentGitGate.read(repo, :ref_oid, ref: qref).success?
+      assert_equal oid_a, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      # Changing remote identity (fingerprint mismatch) fails closed.
+      assert_raises(Hive::AgentGitGate::RemoteConflict) do
+        Hive::AgentGitGate.fetch_pull_request_commit(
+          repository_path: repo, pr_number: 7, expected_oid: oid_b,
+          quarantine_ref: qref, remote: "origin",
+          expected_remote_fingerprint: "0" * 64, allow_local_transport: true
+        )
+      end
+
+      # Unvalidated local transport fails closed when allow_local_transport is false.
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.fetch_pull_request_commit(
+          repository_path: repo, pr_number: 7, expected_oid: oid_b,
+          quarantine_ref: qref, remote: "origin", allow_local_transport: false
+        )
+      end
+
+      # Expired deadline fails closed without spawning Git.
+      assert_raises(Hive::AgentGitGate::DeadlineExceeded) do
+        Hive::AgentGitGate.fetch_pull_request_commit(
+          repository_path: repo, pr_number: 7, expected_oid: oid_b,
+          quarantine_ref: qref, remote: "origin",
+          allow_local_transport: true,
+          deadline: Process.clock_gettime(Process::CLOCK_MONOTONIC) - 1.0
+        )
+      end
+
+      # Unsafe local config fails closed before executing any helper.
+      marker = File.join(repo, "helper-ran")
+      helper = File.join(repo, "evil-helper")
+      File.write(helper, "#!/bin/sh\n: > \"#{marker}\"\n")
+      File.chmod(0o755, helper)
+      run!("git", "-C", repo, "config", "--local", "remote.origin.uploadpack", helper)
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate.fetch_pull_request_commit(
+          repository_path: repo, pr_number: 7, expected_oid: oid_b,
+          quarantine_ref: qref, remote: "origin", allow_local_transport: true
+        )
+      end
+      refute File.exist?(marker)
+      _, _, ref_status = Open3.capture3("git", "-C", repo, "show-ref", "--verify", "--quiet", qref)
+      refute ref_status.success?
+      assert_equal oid_a, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_checkout_detached_preserving_ignored_and_expected_oid_branch_attach
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, ".gitignore"), ".env\nbuild/\n")
+      run!("git", "-C", repo, "add", ".gitignore")
+      run!("git", "-C", repo, "commit", "-m", "ignore", "--quiet")
+      run!("git", "-C", repo, "checkout", "--quiet", "-b", "hive/review/pr-9")
+      oid_a = commit_file(repo, "file.txt", "v1\n", "v1")
+      # Create an unrelated history branch for force-pushed PR target tracking .env.
+      run!("git", "-C", repo, "checkout", "--quiet", "--orphan", "unrelated-pr")
+      run!("git", "-C", repo, "rm", "-rf", "--quiet", ".")
+      File.write(File.join(repo, ".env"), "TRACKED=1\n")
+      File.write(File.join(repo, "file.txt"), "v2\n")
+      run!("git", "-C", repo, "add", "-f", ".env", "file.txt")
+      run!("git", "-C", repo, "commit", "-m", "v2", "--quiet")
+      oid_b = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "checkout", "--quiet", "hive/review/pr-9")
+      run!("git", "-C", repo, "branch", "-D", "unrelated-pr")
+
+      # Unrelated ignored build cache + obstructing ignored .env.
+      FileUtils.mkdir_p(File.join(repo, "build"))
+      File.write(File.join(repo, "build", "cache.bin"), "keep-cache\n")
+      File.write(File.join(repo, ".env"), "LOCAL_SECRET=1\n")
+
+      refused = assert_raises(Hive::AgentGitGate::CheckoutRefused) do
+        Hive::AgentGitGate.checkout_detached_preserving_ignored(repository_path: repo, oid: oid_b)
+      end
+      assert_equal :ignored_obstruction, refused.reason
+      assert_equal "LOCAL_SECRET=1\n", File.read(File.join(repo, ".env"))
+      assert_equal oid_a, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      # Removing the obstruction lets the unrelated-history switch succeed while keeping build/.
+      File.delete(File.join(repo, ".env"))
+      assert_equal :created, Hive::AgentGitGate.ensure_immutable_ref(
+        repository_path: repo, ref: "refs/hive/internal-pr-checkout/archive/gen-1", oid: oid_a
+      )
+      assert_equal :existing, Hive::AgentGitGate.ensure_immutable_ref(
+        repository_path: repo, ref: "refs/hive/internal-pr-checkout/archive/gen-1", oid: oid_a
+      )
+
+      Hive::AgentGitGate.checkout_detached_preserving_ignored(repository_path: repo, oid: oid_b)
+      Hive::AgentGitGate.update_branch_ref(
+        repository_path: repo, branch: "hive/review/pr-9", new_oid: oid_b, expected_old_oid: oid_a
+      )
+      Hive::AgentGitGate.attach_branch_head(
+        repository_path: repo, branch: "hive/review/pr-9", expected_oid: oid_b
+      )
+
+      assert_equal "hive/review/pr-9", Hive::AgentGitGate.read(repo, :current_branch).stdout.strip
+      assert_equal oid_b, Hive::AgentGitGate.read(repo, :head_oid).stdout.strip
+      assert_equal "keep-cache\n", File.read(File.join(repo, "build", "cache.bin"))
+      assert Hive::AgentGitGate.read(repo, :tree_entries, oid: oid_b).success?
+      assert Hive::AgentGitGate.read(repo, :index_entries).success?
+      assert Hive::AgentGitGate.read(repo, :git_common_dir).success?
+      assert_equal "refs/heads/hive/review/pr-9",
+                   Hive::AgentGitGate.read(repo, :head_symbolic_ref).stdout.strip
+    end
+  end
+
   private
 
   def assert_stubbed_publication_failure(before_oid:, after_oid:, exitstatus:,

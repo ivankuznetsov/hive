@@ -1747,6 +1747,69 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_scheduled_init_in_space_root_preserves_conflicting_shared_state
+    skip "systemd user timers are Linux-only" unless RbConfig::CONFIG["host_os"].include?("linux")
+    with_tmp_global_config do |home|
+      calls = File.join(home, "systemctl-calls")
+      File.write(File.join(home, "fake-bin/systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HIVE_CALLS\"\n")
+      with_env("HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => nil, "HIVE_CALLS" => calls) do
+        [ :occupied, :config_conflict, :fresh ].each do |scenario|
+          with_tmp_git_repo do |original|
+            # Nest the checkout so fixture cleanup still owns the entire tree.
+            parent = File.join(original, "container")
+            FileUtils.mkdir_p(parent)
+            project = File.join(parent, "wiki test")
+            run!("git", "clone", "-q", original, project)
+            run!("git", "-C", project, "config", "user.email", "test@example.org")
+            run!("git", "-C", project, "config", "user.name", "Test")
+            scheduler = Hive::LlmWikiBootstrap::Scheduler
+            units = scheduler.systemd_user_dir
+            service, timer, link = scheduler.unit_paths(units, scheduler.service_name(project))
+            shared = File.join(project, ".git/llm-wiki")
+            observed = [ service, timer, link, File.join(units, scheduler::PENDING), calls ]
+            if scenario != :fresh
+              FileUtils.mkdir_p(units)
+              FileUtils.mkdir_p(shared)
+              FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+              File.write(File.join(project, ".llm-wiki/config.json"), '{"created_by":"external"}') if scenario == :config_conflict
+              File.write(service, if scenario == :occupied
+                "unmanaged\n"
+              else
+                scheduler.systemd_service(project, File.basename(service), refresh_script: File.join(shared, "post-commit-refresh.sh"))
+              end)
+              %w[post-commit-refresh.sh compile-log.sh config.json scheduler-service].each_with_index do |name, index|
+                path = File.join(shared, name)
+                observed << path
+                value = name == "scheduler-service" && scenario == :config_conflict ? "#{File.basename(service)}\n" : "original #{name}\n"
+                File.write(path, value)
+                File.chmod(0o640 + index, path)
+              end
+            end
+            before = scheduler_snapshot(observed)
+            capture_io { Hive::Commands::Init.new(project, agent_skill_preflight: false).call }
+            assert File.file?(File.join(project, ".hive-state/config.yml"))
+            assert File.executable?(File.join(project, ".git/hooks/post-commit"))
+            if scenario == :fresh
+              assert_llm_wiki_scheduler_files(home, project)
+              assert_includes File.read(calls), "--user start #{File.basename(timer)}"
+            else
+              assert_equal before, scheduler_snapshot(observed)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def scheduler_snapshot(paths)
+    paths.to_h do |path|
+      stat = File.lstat(path)
+      [ path, [ stat.mode, stat.mtime, stat.symlink? ? File.readlink(path) : Digest::SHA256.file(path).hexdigest ] ]
+    rescue Errno::ENOENT
+      [ path, nil ]
+    end
+  end
+
   def test_llm_wiki_bootstrap_recovers_from_invalid_existing_config_json
     with_tmp_git_repo do |dir|
       FileUtils.mkdir_p(File.join(dir, ".llm-wiki"))
@@ -1924,12 +1987,13 @@ class InitTest < Minitest::Test
     assert File.symlink?(wants)
     service_contents = File.read(service)
     shared_runner = File.join(Hive::LlmWikiBootstrap.git_common_dir(project_dir), "llm-wiki", "post-commit-refresh.sh")
+    assert_includes service_contents, "X-HivePathEncoding=literal-v1\n"
     assert_includes service_contents, "ConditionFileIsExecutable=#{shared_runner}"
     assert_includes service_contents, "WorkingDirectory=#{project_dir}"
     flock_path = Hive::LlmWikiBootstrap::Scheduler.executable_path("flock")
     assert_includes service_contents,
-                    "ExecStart=#{flock_path} --nonblock --conflict-exit-code 0 " \
-                    "%t/llm-wiki-refresh.lock #{shared_runner} --project #{project_dir} --drain"
+                    "ExecStart=:#{flock_path} --nonblock --conflict-exit-code 0 " \
+                    "%t/llm-wiki-refresh.lock #{shared_runner.gsub(" ", "\\x20")} --project #{project_dir.gsub(" ", "\\x20")} --drain"
     assert_includes service_contents, "TimeoutStartSec=4h"
     assert_includes service_contents, "MemoryMax=4G"
     assert_includes service_contents, "MemorySwapMax=0"

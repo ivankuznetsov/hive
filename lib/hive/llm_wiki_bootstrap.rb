@@ -48,26 +48,26 @@ module Hive
 
     def install!(project_root, post_commit_hook: true, scheduler: true)
       project_root = File.expand_path(project_root)
-      validate_project_managed_paths!(project_root)
-      FileUtils.mkdir_p(File.join(project_root, ".llm-wiki"))
-
-      ensure_config(project_root)
-      ensure_project_wiki(project_root)
-      Context.install(project_root)
-      ensure_refresh_scripts(project_root)
-      ensure_shared_runtime(project_root)
-      ensure_post_commit_hook(project_root) if post_commit_hook
-      Scheduler.install(project_root) if scheduler
+      install_runtime_hooks!(project_root, scheduler: scheduler, post_commit_hook: post_commit_hook) do
+        ensure_project_wiki(project_root)
+        Context.install(project_root)
+        yield if block_given?
+      end
     end
 
-    def install_runtime_hooks!(project_root, scheduler: true)
+    def install_runtime_hooks!(project_root, scheduler: true, post_commit_hook: true)
       project_root = File.expand_path(project_root)
       validate_project_managed_paths!(project_root)
+      scheduled = scheduler && !Scheduler.scheduler_disabled?
+      eligible = Scheduler.bootstrap_allowed?(project_root) if scheduled
+
       ensure_config(project_root)
       ensure_refresh_scripts(project_root)
-      ensure_shared_runtime(project_root)
-      ensure_post_commit_hook(project_root)
-      Scheduler.install(project_root) if scheduler
+      yield if block_given?
+
+      ensure_shared_runtime(project_root) unless scheduled
+      ensure_post_commit_hook(project_root) if post_commit_hook
+      Scheduler.install(project_root) if scheduled && eligible
     end
 
     def validate_project_managed_paths!(project_root)

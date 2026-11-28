@@ -526,11 +526,13 @@ class LlmWikiSchedulerTest < Minitest::Test
       end
       File.write(path, original)
       config = File.join(project, ".llm-wiki/config.json")
-      File.write(config, '{"created_by":"other"}')
-      before = snapshot_scheduler(root)
-      Scheduler.reconcile_existing!
-      assert_equal before, snapshot_scheduler(root)
-      assert_empty calls
+      [ '{"created_by":"other"}', %({"created_by":"hive","extra":"\xff"}).b ].each do |bytes|
+        File.binwrite(config, bytes)
+        before = snapshot_scheduler(root)
+        Scheduler.reconcile_existing!
+        assert_equal before, snapshot_scheduler(root)
+        assert_empty calls
+      end
     end
   end
 
@@ -598,6 +600,28 @@ class LlmWikiSchedulerTest < Minitest::Test
     end
   end
 
+  def test_disputed_linked_source_protects_a_marked_primary_timer_from_orphan_cleanup
+    with_scheduler_fixture do |home, main, linked|
+      with_env("HOME" => home, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1") do
+        units = Scheduler.systemd_user_dir
+        FileUtils.mkdir_p(File.join(units, "timers.target.wants"))
+        name = service_for(linked)
+        write_legacy_unit(units, name, linked)
+        source = File.join(units, name)
+        File.write(source, File.read(source).sub("ExecStart=/", "ExecStart=/wrong/"))
+        _, timer, link = Scheduler.unit_paths(units, service_for(main))
+        File.write(timer, Scheduler.systemd_timer(service_for(main)))
+        File.symlink("../#{File.basename(timer)}", link)
+        before = snapshot_scheduler(home)
+        Scheduler.reconcile_existing!
+        Scheduler.install(linked)
+        Scheduler.install(main)
+        assert_equal before, snapshot_scheduler(home)
+        refute_path_exists File.join(main, ".git/llm-wiki")
+      end
+    end
+  end
+
   def test_malformed_stored_bytes_and_unrepresentable_legacy_root_do_not_block_independent_migration
     with_scheduler_sandbox do |root, units, calls|
       bad_root = File.join(root, "a-invalid")
@@ -655,7 +679,7 @@ class LlmWikiSchedulerTest < Minitest::Test
       Scheduler.reconcile_existing!
       assert_equal expected, calls
 
-      FileUtils.remove_entry(project)
+      FileUtils.remove_entry(File.join(project, ".git"))
       fail_reload = lambda { |*args| raise "interrupted" if args == [ "daemon-reload" ] }
       with_replaced_singleton_method(Scheduler, :run_systemctl!, fail_reload) do
         assert_raises(RuntimeError) { Scheduler.reconcile_existing! }
@@ -773,7 +797,7 @@ class LlmWikiSchedulerTest < Minitest::Test
     paths = Dir.glob(File.join(root, "{.config/systemd/user,*/.git/llm-wiki}/**/*"), File::FNM_DOTMATCH)
     paths.reject { |path| File.directory?(path) && !File.symlink?(path) }.to_h do |path|
       stat = File.lstat(path)
-      [ path, [ stat.mode, stat.mtime, stat.symlink? ? File.readlink(path) : File.binread(path) ] ]
+      [ path, [ stat.mode, stat.mtime, stat.symlink? ? File.readlink(path) : Digest::SHA256.file(path).hexdigest ] ]
     end
   end
 

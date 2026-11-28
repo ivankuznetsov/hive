@@ -21,16 +21,35 @@ module Hive
       }.freeze
       PATH_ENCODING = "literal-v1".freeze
       PENDING = ".hive-llm-wiki-reconcile-pending".freeze
-      Classification = Data.define(:disposition, :root, :primary) do
+      Classification = Data.define(:disposition, :encoding, :root, :primary, :protected_services) do
+        def initialize(disposition:, encoding: nil, root: nil, primary: nil, protected_services: [])
+          super
+        end
+
         def proven?
           %i[current proven_unversioned_literal proven_legacy].include?(disposition)
         end
       end
 
+      # Bootstrap can create or replace the project config. An occupied unit
+      # must already have an owner before that evidence changes. The install
+      # pass inspects both ends again immediately before applying any writes.
+      def bootstrap_allowed?(project_root)
+        validate_path!(project_root)
+        config = File.join(project_root, ".llm-wiki/config.json")
+        return false if entry_type(config) && !hive_managed_root?(project_root)
+
+        path = File.join(systemd_user_dir, service_name(project_root))
+        !entry_type(path) || classify_service(path, executable_path("flock")).proven?
+      rescue SystemCallError, ArgumentError
+        false
+      end
+
       def install(project_root)
         return if scheduler_disabled?
 
-        validate_path!(File.expand_path(project_root))
+        project_root = File.expand_path(project_root)
+        return unless bootstrap_allowed?(project_root)
         primary = scheduled_project_root(project_root)
         return unless primary && executable_path("flock")
 
@@ -75,7 +94,9 @@ module Hive
 
       def install_outputs(root, flock)
         name = service_name(root)
-        return unless hive_managed_root?(root)
+        config = owned_config(root)
+        return unless config
+
         shared = File.join(Hive::LlmWikiBootstrap.git_common_dir(root), "llm-wiki")
         return unless shared_record_agrees?(shared, name)
 
@@ -84,7 +105,7 @@ module Hive
         {
           runner => [ Scripts.post_commit_refresh, 0o755 ],
           File.join(shared, "compile-log.sh") => [ Scripts.compile_log, 0o755 ],
-          File.join(shared, "config.json") => [ File.binread(File.join(root, ".llm-wiki/config.json")), nil ],
+          File.join(shared, "config.json") => [ config, nil ],
           File.join(shared, "scheduler-service") => [ "#{name}\n", nil ],
           File.join(systemd_user_dir, name) => [ service, nil ],
           File.join(systemd_user_dir, name.sub(/\.service\z/, ".timer")) => [ systemd_timer(name), nil ]
@@ -131,13 +152,14 @@ module Hive
       end
 
       def classify_service(path, flock)
+        protected_services = []
         fields = unit_fields(path)
         name = File.basename(path)
         description = "Refresh LLM wiki for #{name.delete_suffix('.service')}"
         marker = fields[[ "Unit", "X-HiveManaged" ]]
         version = fields[[ "Unit", "X-HivePathEncoding" ]]
-        return Classification.new(:unowned, nil, nil) unless fields[[ "Unit", "Description" ]] == description
-        return Classification.new(:invalid, nil, nil) unless [ nil, "yes" ].include?(marker) &&
+        return Classification.new(disposition: :unowned, encoding: version) unless fields[[ "Unit", "Description" ]] == description
+        return Classification.new(disposition: :invalid, encoding: version) unless [ nil, "yes" ].include?(marker) &&
           [ nil, PATH_ENCODING ].include?(version)
         stored = fields.fetch([ "Service", "WorkingDirectory" ])
         candidates = version ? [ stored.gsub("%%", "%") ] : [ stored, decode_legacy_path(stored) ].uniq
@@ -146,6 +168,9 @@ module Hive
           validate_path!(root)
           next if Dir.exist?(root) && !executable_path("git")
           primary = scheduled_project_root(root) if Dir.exist?(root)
+          # A matching basename identifies a possible destination to protect,
+          # even when the remaining fields cannot authorize a migration.
+          protected_services << service_name(primary) if primary
           common = primary ? Hive::LlmWikiBootstrap.git_common_dir(root) : File.join(root, ".git")
           config = File.join(root, ".llm-wiki/config.json")
           owned = if entry_type(config)
@@ -156,13 +181,13 @@ module Hive
           next unless owned && shared_record_agrees?(File.join(common, "llm-wiki"), service_name(primary || root))
 
           disposition = service_layout(fields, root, common, flock, version, marker)
-          Classification.new(disposition, root, primary) if disposition
+          Classification.new(disposition: disposition, encoding: version, root: root, primary: primary) if disposition
         end
         return proofs.first if proofs.one?
 
-        Classification.new(:ambiguous, nil, nil)
+        Classification.new(disposition: :ambiguous, encoding: version, protected_services: protected_services)
       rescue SystemCallError, ArgumentError, KeyError
-        Classification.new(:invalid, nil, nil)
+        Classification.new(disposition: :invalid, encoding: version, protected_services: protected_services)
       end
 
       def service_layout(fields, root, common, flock, version, marker)
@@ -241,6 +266,7 @@ module Hive
           names.select { |name| name.end_with?(".service") }.sort.each do |name|
             source = classify_service(File.join(@dir, name), @flock)
             @sources[name] = source
+            @reserved.merge(source.protected_services)
             if source.proven? && source.primary && @flock
               @destinations[source.primary] << name
             elsif source.proven? && !source.primary && safe_timer?(name)
@@ -251,10 +277,10 @@ module Hive
           end
           @destinations[requested_root] if requested_root
           @destinations.keys.group_by { |root| service_name(root) }.each do |name, roots|
-            @reserved << name
-            @retire.delete(name)
-            @unresolved = true unless roots.one? && plan_destination(roots.first, @destinations.fetch(roots.first))
+            vacant_claim = @reserved.add?(name)
+            @unresolved = true unless vacant_claim && roots.one? && plan_destination(roots.first, @destinations.fetch(roots.first))
           end
+          @retire.subtract(@reserved)
           names.select { |name| name.end_with?(".timer") }.each do |timer|
             name = timer.delete_suffix(".timer") + ".service"
             next if @sources.key?(name) || @reserved.include?(name)
@@ -470,13 +496,20 @@ module Hive
       end
 
       def hive_managed_root?(project_root)
-        config_path = File.join(project_root, ".llm-wiki", "config.json")
-        return false unless entry_type(File.dirname(config_path)) == "directory" && entry_type(config_path) == "file"
+        !owned_config(project_root).nil?
+      end
 
-        config = JSON.parse(File.binread(config_path))
-        config.is_a?(Hash) && config["created_by"] == "hive"
-      rescue Errno::ENOENT, JSON::ParserError, TypeError
-        false
+      def owned_config(project_root)
+        path = File.join(project_root, ".llm-wiki/config.json")
+        return unless entry_type(File.dirname(path)) == "directory" && entry_type(path) == "file"
+
+        bytes = File.binread(path).force_encoding(Encoding::UTF_8)
+        return unless bytes.valid_encoding?
+
+        config = JSON.parse(bytes)
+        bytes if config.is_a?(Hash) && config["created_by"] == "hive"
+      rescue Errno::ENOENT, JSON::ParserError
+        nil
       end
 
       def unit_paths(user_dir, service_name)

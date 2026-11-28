@@ -88,6 +88,17 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_runtime_inspection_and_daemon_lifecycle_routes_leave_migratable_units_alone
+    with_tmp_global_config do |home|
+      [ %w[runtime], %w[runtime status], %w[runtime projects], %w[runtime payloads] ].each do |route|
+        assert_startup_reconcile(Dir.pwd, home, route, expected: false)
+      end
+      assert_startup_reconcile(Dir.pwd, home, %w[daemon quiesce --timeout 2 --json], expected: false)
+      assert_startup_reconcile(Dir.pwd, home, %w[daemon status --json], expected: false, exit_code: 1)
+      assert_startup_reconcile(Dir.pwd, home, %w[daemon resume --timeout 2 --json], expected: false)
+    end
+  end
+
   def test_strict_no_write_routes_remain_available_while_admission_is_closed
     with_tmp_global_config do |home|
       with_tmp_git_repo do |project_root|
@@ -289,32 +300,98 @@ class CliVersionTest < Minitest::Test
     JSON.parse(out)
   end
 
-  def assert_startup_reconcile(chdir, home, args, expected:)
+  def assert_startup_reconcile(chdir, home, args, expected:, exit_code: 0)
     with_tmp_dir do |dir|
-      probe = File.join(dir, "reconciled")
-      preload = File.join(dir, "scheduler_probe.rb")
-      File.write(preload, <<~RUBY)
-        require "hive/llm_wiki_bootstrap"
-        Hive::LlmWikiBootstrap::Scheduler.define_singleton_method(:reconcile_existing!) do |**|
-          File.write(ENV.fetch("HIVE_RECONCILE_PROBE"), "called")
-        end
-      RUBY
+      calls = File.join(dir, "systemctl.log")
+      File.write(calls, "")
+      File.write(File.join(dir, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HIVE_CALLS\"\n")
+      File.chmod(0o755, File.join(dir, "systemctl"))
       env = {
-        "HIVE_HOME" => home,
-        "HOME" => home,
-        "PATH" => ENV.fetch("PATH", ""),
-        "HIVE_RECONCILE_PROBE" => probe,
-        "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{preload}" ].compact.join(" ")
+        "HIVE_HOME" => home, "HOME" => dir, "HIVE_CALLS" => calls,
+        "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => nil,
+        "PATH" => [ dir, ENV.fetch("PATH") ].join(File::PATH_SEPARATOR)
       }
+      units = File.join(dir, ".config/systemd/user")
+      FileUtils.mkdir_p(File.join(units, "timers.target.wants"))
+      fixtures = expected ? %i[current legacy literal ambiguous] : [ :legacy ]
+      service_paths = fixtures.to_h { |kind| [ kind, seed_startup_service(dir, units, kind) ] }
+      before = startup_scheduler_snapshot(dir)
+      runtime_before = runtime_storage_snapshot(home)
       bin = File.expand_path("../../bin/hive", __dir__)
       lib = File.expand_path("../../lib", __dir__)
-      runtime_before = runtime_storage_snapshot(home)
-      out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, *args, chdir: chdir)
+      invoke = lambda do
+        out, err, status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, *args, chdir: chdir)
+        assert_equal exit_code, status.exitstatus, "#{args.join(' ')} failed: #{out}\n#{err}"
+      end
+      invoke.call
+      if expected && RbConfig::CONFIG["host_os"].include?("linux")
+        changed = service_paths.values_at(:legacy, :literal)
+        changed.each do |path|
+          assert_includes File.read(path), "X-HivePathEncoding=literal-v1\n"
+        end
+        log = File.readlines(calls, chomp: true)
+        stops = changed.map { |path| "--user stop #{File.basename(path)}" }
+        starts = changed.map { |path| "--user start #{File.basename(path, '.service')}.timer" }
+        assert_equal stops.sort + [ "--user daemon-reload" ] + starts.sort, log
+        after = startup_scheduler_snapshot(dir)
+        service_paths.values_at(:ambiguous, :current).each { |path| assert_equal before[path], after[path] }
+        before.select { |path, _| path.include?("/timers.target.wants/") }.each do |path, metadata|
+          assert_equal metadata, after[path]
+        end
+        invoke.call
+        assert_equal after, startup_scheduler_snapshot(dir)
+        assert_equal log, File.readlines(calls, chomp: true)
+      else
+        assert_equal before, startup_scheduler_snapshot(dir)
+        manager_calls = File.readlines(calls, chomp: true)
+        if args.first(2) == %w[daemon status]
+          # The status command also inspects the daemon's own user service.
+          manager_calls.reject! { |call| call == "--user --version" || call.match?(/\A--user show .* hive-daemon\z/) }
+        end
+        assert_empty manager_calls
+        assert_equal runtime_before, runtime_storage_snapshot(home) unless expected || args.first == "daemon"
+      end
+    end
+  end
 
-      assert status.success?, "#{args.join(' ')} failed: #{out}\n#{err}"
-      assert_equal expected, File.exist?(probe)
-      assert_equal runtime_before, runtime_storage_snapshot(home),
-                   "#{args.join(' ')} must not mutate runtime control-plane storage" unless expected
+  def seed_startup_service(dir, units, kind)
+    scheduler = Hive::LlmWikiBootstrap::Scheduler
+    root = File.join(dir, "#{kind} project")
+    run!("git", "init", "-q", root)
+    FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+    File.write(File.join(root, ".llm-wiki/config.json"), '{"created_by":"hive"}')
+    service = scheduler.service_name(root)
+    path, timer, link = scheduler.unit_paths(units, service)
+    runner = File.join(root, ".git/llm-wiki/post-commit-refresh.sh")
+    if kind == :current
+      # A current unit has converged runtime bytes and modes as well.
+      with_env("HOME" => dir, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1") do
+        scheduler.install(root)
+      end
+      return path if File.exist?(path)
+    end
+    word = root.gsub(" ", "\\x20")
+    content = <<~UNIT
+      [Unit]
+      Description=Refresh LLM wiki for #{File.basename(service, ".service")}
+      X-HiveManaged=yes
+      ConditionFileIsExecutable=#{kind == :literal ? runner : runner.gsub(" ", "\\x20")}
+      [Service]
+      WorkingDirectory=#{kind == :literal ? root : word}
+      ExecStart=#{scheduler.executable_path("flock")} --nonblock --conflict-exit-code 0 %t/llm-wiki-refresh.lock #{runner.gsub(" ", "\\x20")} --project #{word} --drain
+    UNIT
+    content = content.sub("--project /", "--project /unknown/") if kind == :ambiguous
+    File.write(path, content)
+    File.write(timer, scheduler.systemd_timer(service))
+    File.symlink("../#{File.basename(timer)}", link)
+    path
+  end
+
+  def startup_scheduler_snapshot(dir)
+    Dir.glob(File.join(dir, "{.config/systemd/user,*/.git/llm-wiki}/**/*"), File::FNM_DOTMATCH)
+       .reject { |path| File.directory?(path) }.to_h do |path|
+      stat = File.lstat(path)
+      [ path, [ stat.mode, stat.mtime, stat.symlink? ? File.readlink(path) : Digest::SHA256.file(path).hexdigest ] ]
     end
   end
 

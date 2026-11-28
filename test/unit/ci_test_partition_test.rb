@@ -287,10 +287,11 @@ class CiTestPartitionTest < Minitest::Test
     with_loaded_rakefile do
       gate_files = Object.const_get(:HIVE_SYSTEMD_USER_GATE_TESTS)
       shards = Object.const_get(:HIVE_COVERAGE_SHARDS)
-      offline_test = "test/integration/systemd_user_service_offline_test.rb"
-
-      assert_includes gate_files, offline_test
-      assert_equal 1, shards.flatten.count(offline_test)
+      %w[systemd_user_service_offline llm_wiki_systemd_user].each do |probe|
+        path = "test/integration/#{probe}_test.rb"
+        assert_includes gate_files, path
+        assert_equal 1, shards.flatten.count(path)
+      end
 
       workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
       job = workflow.fetch("jobs").fetch("systemd-user-gate")

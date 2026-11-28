@@ -634,6 +634,47 @@ class LockTest < Minitest::Test
     assert_nil holder_id
   end
 
+  def test_acquire_claim_if_predicate_rejects_without_mutating_lease_or_version
+    folder = task_folder(120)
+    subject = repository
+
+    assert_equal({ idle: true, lease_version: 0, holder_id: nil }, subject.lease_snapshot(folder))
+
+    observed_subject = nil
+    error = assert_raises(Hive::RuntimeControlPlane::TaskLeaseRepository::LeaseConditionFailed) do
+      subject.acquire(
+        folder, { "stage" => "review" }, create: false,
+        claim_if: lambda { |_db, subj|
+          observed_subject = subj
+          false
+        }
+      )
+    end
+    assert_kind_of Hive::ConcurrentRunError, error
+    assert_equal "120", observed_subject.fetch(:task_id)
+    assert_nil @database.read { |db| db[:task_leases].where(task_id: "120").first }
+    assert_equal({ idle: true, lease_version: 0, holder_id: nil }, subject.lease_snapshot(folder))
+
+    acquired = subject.acquire(folder, { "stage" => "review" }, create: false, claim_if: ->(_db, _subj) { true })
+    snap_held = subject.lease_snapshot(folder)
+    refute snap_held[:idle]
+    assert_equal 1, snap_held[:lease_version]
+    assert_equal acquired.fetch("lock_id"), snap_held[:holder_id]
+
+    assert subject.release(folder, lock_id: acquired.fetch("lock_id"))
+    assert_equal({ idle: true, lease_version: 1, holder_id: nil }, subject.lease_snapshot(folder))
+
+    # A failing claim_if after an existing released row must not bump lease_version.
+    assert_raises(Hive::RuntimeControlPlane::TaskLeaseRepository::LeaseConditionFailed) do
+      subject.acquire(folder, { "stage" => "review" }, create: false, claim_if: ->(_db, _subj) { false })
+    end
+    assert_equal({ idle: true, lease_version: 1, holder_id: nil }, subject.lease_snapshot(folder))
+
+    second = subject.acquire(folder, { "stage" => "review" }, create: false)
+    assert subject.release(folder, lock_id: second.fetch("lock_id"))
+    assert_equal({ idle: true, lease_version: 2, holder_id: nil }, subject.lease_snapshot(folder))
+  end
+
   private
 
   def task_folder(id)

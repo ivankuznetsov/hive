@@ -2027,4 +2027,539 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal proposal, result.attempt.proposal_binding
     end
   end
+
+  def test_internal_pr_repush_bypasses_old_terminal_replay_and_launches_fresh_attempt
+    require "hive/internal_pr_checkout"
+
+    with_internal_pr_dispatcher do |env|
+      oid_a = env[:oid_a]
+      oid_b = "b" * 40
+      digest_b = Digest::SHA256.hexdigest("repush-b")
+      phase = :head_a
+
+      reconciler = lambda do |task:, mode:, deadline:, lock_held:|
+        assert lock_held, "reconciler must execute under held task lease"
+        if phase == :head_a
+          Hive::InternalPrCheckout::Result.new(
+            status: "current", reason: "head_unchanged",
+            task_slug: task.slug, task_id: task.id.to_s, pr_number: 42,
+            pr_url: "https://github.com/acme/repo/pull/42", generation: 1,
+            head_oid: oid_a, candidate_oid: oid_a,
+            pr_observation: { "state" => "OPEN", "head_oid" => oid_a, "generation" => 1 }
+          )
+        elsif phase == :repush_b
+          digest_b = commit_internal_pr_head!(env[:task].folder, generation: 2, head_oid: oid_b)
+          phase = :head_b
+          Hive::InternalPrCheckout::Result.new(
+            status: "reopened", reason: "head_changed",
+            task_slug: task.slug, task_id: task.id.to_s, pr_number: 42,
+            pr_url: "https://github.com/acme/repo/pull/42", generation: 2,
+            head_oid: oid_b, previous_head_oid: oid_a, candidate_oid: oid_b,
+            checkout_digest: digest_b,
+            pr_observation: { "state" => "OPEN", "head_oid" => oid_b, "generation" => 2 }
+          )
+        else
+          Hive::InternalPrCheckout::Result.new(
+            status: "current", reason: "head_unchanged",
+            task_slug: task.slug, task_id: task.id.to_s, pr_number: 42,
+            pr_url: "https://github.com/acme/repo/pull/42", generation: 2,
+            head_oid: oid_b, candidate_oid: oid_b, checkout_digest: digest_b,
+            pr_observation: { "state" => "OPEN", "head_oid" => oid_b, "generation" => 2 }
+          )
+        end
+      end
+      dispatcher = env[:build_dispatcher].call(internal_pr_reconciler: reconciler)
+
+      # Gen 1 succeeds.
+      first = dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-a-1",
+        provider: "codex", interactive: true, now: NOW
+      )
+      assert_equal :accepted, first.status
+      assert_equal "current", first.reconciliation.status
+      terminalize_attempt(env[:store], env[:launcher], first, outcome: "succeeded", exit_status: 0, now: NOW + 5)
+
+      # Repush to B bypasses old terminal replay and launches a brand-new attempt.
+      phase = :repush_b
+      second = dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-b-1",
+        provider: "codex", interactive: true, now: NOW + 10
+      )
+      assert_equal :accepted, second.status
+      assert_equal "reopened", second.reconciliation.status
+      refute_equal first.attempt.task_generation, second.attempt.task_generation
+      assert_equal 2, env[:launcher].launched.length
+      assert_equal(
+        { "state" => "OPEN", "head_oid" => oid_b, "generation" => 2 },
+        second.attempt["diagnostics"]["internal_pr_observation"]
+      )
+
+      # After B completes, subsequent unchanged reopen replays B's terminal receipt with `current`.
+      terminalize_attempt(env[:store], env[:launcher], second, outcome: "succeeded", exit_status: 0, now: NOW + 20)
+      third = dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-b-2",
+        provider: "codex", interactive: true, now: NOW + 30
+      )
+      assert_equal :terminal_replay, third.status
+      assert_equal second.attempt.attempt_id, third.attempt.attempt_id
+      assert_equal "current", third.reconciliation.status
+      assert_equal 2, env[:launcher].launched.length
+    end
+  end
+
+  def test_internal_pr_recovery_after_reopened_discards_old_lineage
+    require "hive/internal_pr_checkout"
+
+    with_internal_pr_dispatcher do |env|
+      oid_a = env[:oid_a]
+      oid_b = "b" * 40
+      digest_b = Digest::SHA256.hexdigest("recover-repush-b")
+      reopened = false
+      reconciler = lambda do |task:, mode:, deadline:, lock_held:|
+        if reopened
+          commit_internal_pr_head!(env[:task].folder, generation: 2, head_oid: oid_b, digest: digest_b)
+          Hive::InternalPrCheckout::Result.new(
+            status: "reopened", reason: "head_changed",
+            task_slug: task.slug, task_id: task.id.to_s, pr_number: 42,
+            pr_url: "https://github.com/acme/repo/pull/42", generation: 2,
+            head_oid: oid_b, previous_head_oid: oid_a, candidate_oid: oid_b,
+            checkout_digest: digest_b
+          )
+        else
+          Hive::InternalPrCheckout::Result.new(
+            status: "current", reason: "head_unchanged",
+            task_slug: task.slug, task_id: task.id.to_s, pr_number: 42,
+            pr_url: "https://github.com/acme/repo/pull/42", generation: 1,
+            head_oid: oid_a, candidate_oid: oid_a
+          )
+        end
+      end
+      dispatcher = env[:build_dispatcher].call(internal_pr_reconciler: reconciler)
+
+      first = dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-old-1",
+        provider: "codex", interactive: false, now: NOW
+      )
+      lost = env[:store].mark_lost(first.attempt, reason: "worker_died", now: NOW + 5)
+      ready_loss(env[:store], lost, now: NOW + 6)
+
+      reopened = true
+      recovered = dispatcher.dispatch_recovery(
+        source_attempt: lost, task: env[:task], project: "demo",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-recovery-b",
+        provider: "codex",
+        inherited_outputs: [ { "path" => "open/fake/out.txt", "size" => 1, "sha256" => "1" * 64 } ],
+        retry_charge: 2, now: NOW + 10, reconcile_mode: :explicit_reopen
+      )
+
+      assert_equal :accepted, recovered.status
+      assert_equal "reopened", recovered.reconciliation.status
+      assert_equal 0, recovered.attempt["retry_charge"]
+      assert_empty recovered.attempt["inherited_outputs"]
+      refute_equal lost.task_generation, recovered.attempt.task_generation
+    end
+  end
+
+  def test_internal_pr_busy_blocked_and_remote_race_never_invoke_router_or_launcher
+    require "hive/internal_pr_checkout"
+
+    with_internal_pr_dispatcher do |env|
+      router_calls = 0
+      spy_router = lambda do |**|
+        router_calls += 1
+        flunk "router must not be called when reconciliation refuses admission"
+      end
+      explicit_policy = Hive::ProviderRouting::Policy.explicit(
+        stage: "review",
+        routes: [],
+        requirements: Hive::ProviderRouting::Requirements.empty,
+        pin: nil,
+        account_policy: {}
+      )
+
+      outcomes = [
+        [ Hive::InternalPrCheckout::Result.new(status: "busy", reason: "manual_steering", task_slug: env[:task].slug), :deferred ],
+        [ Hive::InternalPrCheckout::Result.new(status: "blocked", reason: "pointer_unowned", retryable: false, task_slug: env[:task].slug), :blocked ],
+        [ Hive::InternalPrCheckout::Result.new(status: "blocked", reason: "pending_invalid", retryable: false, task_slug: env[:task].slug), :blocked ],
+        [ Hive::InternalPrCheckout::Result.new(status: "blocked", reason: "remote_changed_before_linearization", retryable: true, task_slug: env[:task].slug), :deferred ],
+        [ Hive::InternalPrCheckout::Result.new(status: "blocked", reason: "provider_unavailable", retryable: true, task_slug: env[:task].slug), :deferred ]
+      ]
+
+      outcomes.each_with_index do |(rec, expected_status), idx|
+        dispatcher = env[:build_dispatcher].call(
+          internal_pr_reconciler: ->(**) { rec },
+          router: spy_router,
+          routing_policy_resolver: ->(_task, _stage) { explicit_policy }
+        )
+        result = dispatcher.dispatch(
+          task: env[:task], project: "demo", intended_stage: "6-review",
+          argv: [ "hive", "review", env[:task].slug ], request_id: "req-refuse-#{idx}",
+          provider: "codex", interactive: false, now: NOW + idx
+        )
+        assert_equal expected_status, result.status, "failed for #{rec.reason}"
+        assert_equal rec.reason, result.reason
+        assert_equal rec, result.reconciliation
+        assert_nil result.attempt
+      end
+
+      assert_equal 0, router_calls
+      assert_empty env[:launcher].launched
+      assert_empty env[:store].active_attempts
+    end
+  end
+
+  def test_internal_pr_stale_queued_token_is_superseded_and_current_queued_reopen_is_idempotent
+    require "hive/internal_pr_checkout"
+
+    with_internal_pr_dispatcher do |env|
+      oid_a = env[:oid_a]
+      oid_b = "b" * 40
+      digest_b = Digest::SHA256.hexdigest("queued-b")
+
+      gen_a = Hive::Attempts::Generation.resolve(
+        task: env[:task], project: "demo", intended_stage: "6-review"
+      )
+
+      # Case 1: Another actor commits B before the queued request acquires the lease.
+      commit_internal_pr_head!(env[:task].folder, generation: 2, head_oid: oid_b, digest: digest_b)
+      reconciler_calls = 0
+      dispatcher = env[:build_dispatcher].call(
+        internal_pr_reconciler: lambda { |**|
+          reconciler_calls += 1
+          flunk "stale queued token must supersede before remote reconciliation"
+        },
+        task_resolver: ->(_req) { env[:task] }
+      )
+      stale_req = FakeRequest.new(
+        slug: env[:task].slug, project: "demo",
+        argv: [ "hive", "review", env[:task].slug ],
+        request_id: "queued-stale-1", task_generation: gen_a.task_generation,
+        inherited_outputs: [], recovery: nil, requestor: "bot", trigger: "reopen"
+      )
+      superseded = dispatcher.dispatch_request(stale_req, now: NOW)
+      assert_equal :superseded, superseded.status
+      assert_equal "stale_generation", superseded.reason
+      assert_equal 0, reconciler_calls
+      assert_empty env[:launcher].launched
+      assert_nil env[:store].attempt_id_for_request(request_id: "queued-stale-1")
+    end
+
+    # Case 2: Current explicit queued reopen discovers B itself and converges idempotently across restart.
+    with_internal_pr_dispatcher do |env|
+      oid_a = env[:oid_a]
+      oid_b = "b" * 40
+      digest_b = Digest::SHA256.hexdigest("queued-discover-b")
+
+      gen_a = Hive::Attempts::Generation.resolve(
+        task: env[:task], project: "demo", intended_stage: "6-review"
+      )
+      reconciler = lambda do |task:, mode:, deadline:, lock_held:|
+        assert_equal :explicit_reopen, mode
+        digest_b = commit_internal_pr_head!(task.folder, generation: 2, head_oid: oid_b)
+        Hive::InternalPrCheckout::Result.new(
+          status: "reopened", reason: "head_changed",
+          task_slug: task.slug, task_id: task.id.to_s, pr_number: 42,
+          pr_url: "https://github.com/acme/repo/pull/42", generation: 2,
+          head_oid: oid_b, previous_head_oid: oid_a, candidate_oid: oid_b,
+          checkout_digest: digest_b
+        )
+      end
+      dispatcher = env[:build_dispatcher].call(
+        internal_pr_reconciler: reconciler,
+        task_resolver: ->(_req) { env[:task] }
+      )
+      req = FakeRequest.new(
+        slug: env[:task].slug, project: "demo",
+        argv: [ "hive", "review", env[:task].slug ],
+        request_id: "queued-bot-reopen", task_generation: gen_a.task_generation,
+        inherited_outputs: [ { "path" => "open/stale/out.txt", "size" => 1, "sha256" => "1" * 64 } ],
+        recovery: nil, requestor: "bot", trigger: "reopen"
+      )
+      admitted = dispatcher.dispatch_request(req, now: NOW)
+      assert_equal :accepted, admitted.status
+      assert_equal "reopened", admitted.reconciliation.status
+      assert_equal "queued-bot-reopen:reopen:#{digest_b[0, 16]}", admitted.attempt["request_id"]
+      assert_empty admitted.attempt["inherited_outputs"]
+      assert_equal 1, env[:launcher].launched.length
+
+      # Restart while B is live -> attaches to exact B attempt.
+      replay_live = dispatcher.dispatch_request(req, now: NOW + 1)
+      assert_equal :existing_live, replay_live.status
+      assert_equal admitted.attempt.attempt_id, replay_live.attempt.attempt_id
+      assert_nil replay_live.reconciliation
+
+      # Restart after B terminalizes -> replays B terminal attempt with zero duplicate rows.
+      terminalize_attempt(env[:store], env[:launcher], admitted, outcome: "succeeded", exit_status: 0, now: NOW + 5)
+      replay_done = dispatcher.dispatch_request(req, now: NOW + 10)
+      assert_equal :terminal_replay, replay_done.status
+      assert_equal admitted.attempt.attempt_id, replay_done.attempt.attempt_id
+      assert_equal 1, env[:launcher].launched.length
+    end
+  end
+
+  def test_internal_pr_lease_contention_live_owner_probe_race_and_lock_order
+    require "hive/internal_pr_checkout"
+
+    with_internal_pr_dispatcher do |env|
+      oid_a = env[:oid_a]
+      rec_ok = Hive::InternalPrCheckout::Result.new(
+        status: "current", reason: "head_unchanged",
+        task_slug: env[:task].slug, task_id: env[:task].id.to_s, pr_number: 42,
+        pr_url: "https://github.com/acme/repo/pull/42", generation: 1,
+        head_oid: oid_a, candidate_oid: oid_a
+      )
+
+      # Part 1: Pause lease holder after reconcile and before insert -> competing caller gets busy/task_locked
+      # with zero live attempts; holder alone creates the attempt row; launcher runs AFTER lease release!
+      entered_pause = Queue.new
+      release_pause = Queue.new
+      lease_idle_at_launch = nil
+      lease_held_in_thread_at_launch = nil
+      open_tx_at_lease_acquire = nil
+
+      orig_acquire = env[:lease_repo].method(:acquire)
+      env[:lease_repo].define_singleton_method(:acquire) do |*args, **kwargs|
+        open_tx_at_lease_acquire = env[:database].read { |db| db.in_transaction? }
+        orig_acquire.call(*args, **kwargs)
+      end
+
+      launch_orig = env[:launcher].method(:launch)
+      env[:launcher].define_singleton_method(:launch) do |record, claim_capability:|
+        lease_idle_at_launch = env[:lease_repo].lease_snapshot(env[:task].folder).fetch(:idle)
+        lease_held_in_thread_at_launch = Hive::Lock.task_lock_held?(env[:task].folder)
+        launch_orig.call(record, claim_capability: claim_capability)
+      end
+
+      holder_dispatcher = env[:build_dispatcher].call(
+        internal_pr_reconciler: ->(**) { rec_ok },
+        admission_failpoint: lambda { |phase, *_|
+          if phase == :after_reconcile_before_insert
+            entered_pause << true
+            release_pause.pop
+          end
+        }
+      )
+      competitor_dispatcher = env[:build_dispatcher].call(
+        internal_pr_reconciler: ->(**) { flunk "contended competitor must not reconcile" }
+      )
+
+      holder_thread = Thread.new do
+        begin
+          holder_dispatcher.dispatch(
+            task: env[:task], project: "demo", intended_stage: "6-review",
+            argv: [ "hive", "review", env[:task].slug ], request_id: "req-holder",
+            provider: "codex", interactive: false, now: NOW
+          )
+        rescue Exception => e
+          entered_pause << e
+          raise
+        end
+      end
+
+      signal = entered_pause.pop
+      raise signal if signal.is_a?(Exception)
+      # Confirm zero live attempt rows exist while holder is paused between reconcile and insert.
+      assert_empty env[:store].active_attempts
+      contended = competitor_dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-contended",
+        provider: "codex", interactive: false, now: NOW
+      )
+      assert_equal :deferred, contended.status
+      assert_equal "task_locked", contended.reason
+      assert_equal "busy", contended.reconciliation.status
+      assert_equal "task_locked", contended.reconciliation.reason
+
+      release_pause << true
+      holder_result = holder_thread.value
+      assert_equal :accepted, holder_result.status
+      assert_equal false, open_tx_at_lease_acquire, "must never acquire task lease inside an open DB transaction"
+      assert_equal true, lease_idle_at_launch, "task lease must be released before launcher handoff"
+      assert_equal false, lease_held_in_thread_at_launch, "thread task-lock state must be cleared before launcher handoff"
+      assert_equal 1, env[:launcher].launched.length
+
+      # Part 2: Attempt 1 is now `launching` (unclaimed) and task lease is released.
+      # A second admission attaches without touching the task lease (lease_version unchanged).
+      version_before_attach = env[:lease_repo].lease_snapshot(env[:task].folder).fetch(:lease_version)
+      attached = competitor_dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-attach-unclaimed",
+        provider: "codex", interactive: true, now: NOW + 1
+      )
+      assert_equal :existing_live, attached.status
+      assert_equal holder_result.attempt.attempt_id, attached.attempt.attempt_id
+      assert_nil attached.reconciliation
+      assert_equal version_before_attach, env[:lease_repo].lease_snapshot(env[:task].folder).fetch(:lease_version)
+
+      # Worker can acquire the real task lease cleanly.
+      worker_lock = env[:lease_repo].acquire(env[:task].folder, { "stage" => "review" }, create: false)
+      assert env[:lease_repo].release(env[:task].folder, lock_id: worker_lock.fetch("lock_id"))
+    end
+
+    # Part 3: Caller paused AFTER negative live-owner probe; another caller inserts a launching row;
+    # resumed caller's conditional claim_if rejects lease claim without bumping lease_version and attaches cleanly.
+    with_internal_pr_dispatcher do |env|
+      oid_a = env[:oid_a]
+      rec_ok = Hive::InternalPrCheckout::Result.new(
+        status: "current", reason: "head_unchanged",
+        task_slug: env[:task].slug, task_id: env[:task].id.to_s, pr_number: 42,
+        pr_url: "https://github.com/acme/repo/pull/42", generation: 1,
+        head_oid: oid_a, candidate_oid: oid_a
+      )
+
+      winner_dispatcher = env[:build_dispatcher].call(internal_pr_reconciler: ->(**) { rec_ok })
+      winner_result = nil
+      version_after_winner = nil
+
+      paused_dispatcher = env[:build_dispatcher].call(
+        internal_pr_reconciler: ->(**) { flunk "raced caller must not reconcile after claim_if fails" },
+        admission_failpoint: lambda { |phase, *_|
+          if phase == :after_live_owner_probe
+            winner_result = winner_dispatcher.dispatch(
+              task: env[:task], project: "demo", intended_stage: "6-review",
+              argv: [ "hive", "review", env[:task].slug ], request_id: "req-probe-winner",
+              provider: "codex", interactive: false, now: NOW
+            )
+            assert_equal :accepted, winner_result.status
+            version_after_winner = env[:lease_repo].lease_snapshot(env[:task].folder).fetch(:lease_version)
+          end
+        }
+      )
+
+      loser_result = paused_dispatcher.dispatch(
+        task: env[:task], project: "demo", intended_stage: "6-review",
+        argv: [ "hive", "review", env[:task].slug ], request_id: "req-probe-loser",
+        provider: "codex", interactive: true, now: NOW
+      )
+
+      assert_equal :existing_live, loser_result.status
+      assert_equal winner_result.attempt.attempt_id, loser_result.attempt.attempt_id
+      assert_nil loser_result.reconciliation
+      assert_equal version_after_winner, env[:lease_repo].lease_snapshot(env[:task].folder).fetch(:lease_version),
+                   "claim_if must reject without touching task_leases"
+      assert_equal 1, env[:launcher].launched.length
+      # Winner's worker acquires the real lease with zero spurious contention.
+      worker_lock = env[:lease_repo].acquire(env[:task].folder, { "stage" => "review" }, create: false)
+      assert env[:lease_repo].release(env[:task].folder, lock_id: worker_lock.fetch("lock_id"))
+    end
+  end
+
+  private
+
+  def with_internal_pr_dispatcher
+    require "hive/internal_pr_checkout"
+    require "hive/runtime_control_plane/task_lease_repository"
+
+    with_tmp_dir do |root|
+      database = attempt_database(root, projects: [ "demo" ])
+      state_root = project_state_root(root, "demo")
+      folder = File.join(state_root, "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      oid_a = "a" * 40
+      File.write(File.join(folder, "meta.yml"), {
+        "id" => 42, "slug" => "adhoc-review-pr-42", "source" => "ad-hoc", "workflow" => "coding"
+      }.to_yaml)
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{oid_a}
+        ---
+        PR 42
+      MD
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "Review PR 42\n")
+      Hive::InternalPrCheckout.initialize_new_task!(
+        task_folder: folder, task_id: "42", task_slug: "adhoc-review-pr-42", project: "demo",
+        pr_host: "github.com", pr_repository: "acme/repo", pr_number: 42,
+        pr_url: "https://github.com/acme/repo/pull/42", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/repo", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-42", head_oid: oid_a
+      )
+
+      task = FakeTask.new(
+        id: 42, slug: "adhoc-review-pr-42", state_file: state_file,
+        stage_index: 6, stage_name: "review", project_root: File.dirname(state_root),
+        worktree_path: nil, workflow: "coding", folder: folder
+      )
+      store = Hive::Attempts::Repository.new(
+        root: File.join(root, "attempts"), database: database
+      )
+      lease_repo = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: database,
+        clock: -> { NOW },
+        process_start_time: Hive::Lock.method(:process_start_time),
+        process_alive: Hive::Lock.method(:process_identity_alive?)
+      )
+      launcher = FakeLauncher.new
+      counter = 0
+      build_dispatcher = lambda do |**overrides|
+        Hive::Attempts::Dispatcher.new(
+          store: store,
+          launcher: launcher,
+          clock: -> { NOW },
+          id_generator: -> { counter += 1; "attempt-pr-#{counter}" },
+          capability_generator: -> { CLAIM_CAPABILITY },
+          task_lease_repository: lease_repo,
+          **overrides
+        )
+      end
+
+      prev_repo = Hive::Lock.task_lease_repository
+      Hive::Lock.task_lease_repository = lease_repo
+      begin
+        yield(
+          root: root, database: database, task: task, store: store,
+          lease_repo: lease_repo, launcher: launcher, oid_a: oid_a,
+          build_dispatcher: build_dispatcher
+        )
+      ensure
+        Hive::Lock.task_lease_repository = prev_repo
+      end
+    end
+  end
+
+  def commit_internal_pr_head!(folder, generation:, head_oid:, digest: nil)
+    store = Hive::InternalPrCheckout::Store.new(folder)
+    current = store.read_current
+    prev_gen = generation - 1
+    tx_id = "tx-gen-#{generation}"
+    ret_label = Hive::InternalPrCheckout::Identity.retirement_label_for(
+      transaction_id: tx_id, target_oid: head_oid
+    )
+    computed_digest = Hive::InternalPrCheckout::Store.head_transition_digest(
+      pr_url: current.fetch("pr_url"),
+      pr_number: current.fetch("pr_number"),
+      branch: current.fetch("branch"),
+      reviewed_oid: head_oid,
+      generation: generation,
+      previous_generation: prev_gen,
+      retirement_label: ret_label,
+      transaction_id: tx_id
+    )
+    store.write_current!(current.merge(
+      "generation" => generation,
+      "previous_generation" => prev_gen,
+      "retirement_label" => ret_label,
+      "transaction_id" => tx_id,
+      "reviewed_oid" => head_oid,
+      "candidate_oid" => head_oid,
+      "head_transition_digest" => computed_digest
+    ))
+    File.write(File.join(folder, "pr.md"), <<~MD)
+      ---
+      source: ad-hoc
+      pr_number: 42
+      pr_url: https://github.com/acme/repo/pull/42
+      head_oid: #{head_oid}
+      ---
+      PR 42
+    MD
+    computed_digest
+  end
 end

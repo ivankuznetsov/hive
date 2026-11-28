@@ -4508,7 +4508,13 @@ module Hive
           admission_context: admission_context
         )
         request.task_generation.to_s == generation.task_generation.to_s
-      rescue Hive::Error, SystemCallError, IOError
+      rescue Hive::Error, SystemCallError, IOError => e
+        # U4.6: Defer an idle pending internal-PR checkout read to the locked
+        # admission fence rather than prematurely superseding the queued request.
+        return true if defined?(Hive::InternalPrCheckout::Error) &&
+                       e.is_a?(Hive::InternalPrCheckout::Error) &&
+                       e.reason == "transition_interrupted"
+
         false
       end
 

@@ -9,7 +9,7 @@ module Hive
     PS_LSTART_TIMEOUT_SECONDS = 0.25
 
     def with_task_lock(task_folder, payload = nil, create: true, observation: nil,
-                       acquire_under_commit_lock: nil, **payload_keywords)
+                       acquire_under_commit_lock: nil, claim_if: nil, **payload_keywords)
       payload = (payload || {}).merge(payload_keywords)
       lock_key = task_lease_repository.lease_key(task_folder, observation: observation)
       held = (Thread.current[:hive_task_locks] ||= {})
@@ -26,7 +26,7 @@ module Hive
       held.delete(lock_key)
       acquire = lambda do
         acquire_task_lock(
-          task_folder, payload, create: create, observation: observation
+          task_folder, payload, create: create, observation: observation, claim_if: claim_if
         )
       end
       lock_data = if acquire_under_commit_lock
@@ -57,7 +57,7 @@ module Hive
       false
     end
 
-    def acquire_task_lock(task_folder, payload = nil, create: true, observation: nil, **payload_keywords)
+    def acquire_task_lock(task_folder, payload = nil, create: true, observation: nil, claim_if: nil, **payload_keywords)
       require "hive/attempts/context"
 
       payload = (payload || {}).merge(payload_keywords)
@@ -65,7 +65,7 @@ module Hive
              .merge(payload.transform_keys(&:to_s))
              .merge(Hive::Attempts::Context.projection)
       task_lease_repository.acquire(
-        task_folder, data, create: create, observation: observation
+        task_folder, data, create: create, observation: observation, claim_if: claim_if
       )
     end
 

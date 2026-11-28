@@ -24,23 +24,31 @@ module Hive
 
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc,
-                   proposal_admission: nil)
-        foreground.dispatch(
+                   proposal_admission: nil, reconcile_mode: nil,
+                   reconcile_deadline: nil)
+        kwargs = {
           task: task, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider,
           interactive: interactive, now: now, proposal_admission: proposal_admission
-        )
+        }
+        kwargs[:reconcile_mode] = reconcile_mode unless reconcile_mode.nil?
+        kwargs[:reconcile_deadline] = reconcile_deadline unless reconcile_deadline.nil?
+        foreground.dispatch(**kwargs)
       end
 
       def dispatch_request(request, interactive: false, now: Time.now.utc,
                            admission_view: nil, replay_semantic_terminal: false,
-                           agent_failure_retry: false)
-        daemon.dispatch_request(
-          request, interactive: interactive, now: now,
+                           agent_failure_retry: false, reconcile_mode: nil,
+                           reconcile_deadline: nil)
+        kwargs = {
+          interactive: interactive, now: now,
           admission_view: admission_view,
           replay_semantic_terminal: replay_semantic_terminal,
           agent_failure_retry: agent_failure_retry
-        )
+        }
+        kwargs[:reconcile_mode] = reconcile_mode unless reconcile_mode.nil?
+        kwargs[:reconcile_deadline] = reconcile_deadline unless reconcile_deadline.nil?
+        daemon.dispatch_request(request, **kwargs)
       end
 
       # Observation and attachment do not own worker lifetime or recovery.

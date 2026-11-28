@@ -38,10 +38,10 @@ module Hive
 
     ClientResult = Data.define(
       :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes,
-      :output_status, :reason
+      :output_status, :reason, :reconciliation
     ) do
       def initialize(status:, exit_status:, outcome:, receipt:, attempt_id:, stdout_bytes: 0,
-                     output_status: nil, reason: nil)
+                     output_status: nil, reason: nil, reconciliation: nil)
         super
       end
 
@@ -49,9 +49,10 @@ module Hive
     end
 
     DispatchResult = Data.define(
-      :status, :attempt, :receipt, :attach_descriptor, :reason, :decision
+      :status, :attempt, :receipt, :attach_descriptor, :reason, :decision, :reconciliation
     ) do
-      def initialize(status:, attempt:, receipt:, attach_descriptor:, reason:, decision: nil)
+      def initialize(status:, attempt:, receipt:, attach_descriptor:, reason:,
+                     decision: nil, reconciliation: nil)
         super
       end
 
@@ -60,5 +61,23 @@ module Hive
     end
 
     class UnsupportedDetachment < Hive::Error; end
+
+    class ReconciliationBusy < Hive::ConcurrentRunError
+      attr_reader :reconciliation
+
+      def initialize(message, reconciliation:)
+        @reconciliation = reconciliation
+        super(message)
+      end
+    end
+
+    class ReconciliationBlocked < Hive::Error
+      attr_reader :reconciliation
+
+      def initialize(message, reconciliation:)
+        @reconciliation = reconciliation
+        super(message)
+      end
+    end
   end
 end

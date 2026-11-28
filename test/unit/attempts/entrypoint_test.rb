@@ -278,4 +278,73 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal "registered", captured.fetch(:project)
     assert_equal [ "/tmp/registered" ], resolved_paths
   end
+
+  def test_reconciliation_blocked_deferred_and_attached_results_preserve_typed_observation
+    require "hive/internal_pr_checkout"
+    task = FakeTask.new(slug: "pr-7-demo", project_root: "/tmp/project", project_name: "demo")
+    blocked_rec = Hive::InternalPrCheckout::Result.new(
+      status: "blocked", reason: "pointer_unowned", retryable: false,
+      task_slug: "pr-7-demo", guidance: "worktree pointer is unowned"
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) do |**_kw|
+      Hive::Attempts::DispatchResult.new(
+        status: :blocked, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "pointer_unowned", reconciliation: blocked_rec
+      )
+    end
+    entrypoint = Hive::Attempts::Entrypoint.new(store: Object.new, dispatcher: dispatcher)
+
+    err = assert_raises(Hive::Attempts::ReconciliationBlocked) do
+      entrypoint.dispatch(task: task, intended_stage: "6-review", argv: %w[hive run pr-7-demo])
+    end
+    assert_equal blocked_rec, err.reconciliation
+
+    non_interactive = entrypoint.dispatch(
+      task: task, intended_stage: "6-review", argv: %w[hive run pr-7-demo], interactive: false
+    )
+    assert_equal :blocked, non_interactive.status
+    assert_equal blocked_rec, non_interactive.reconciliation
+
+    busy_rec = Hive::InternalPrCheckout::Result.new(
+      status: "busy", reason: "task_locked", retryable: true,
+      task_slug: "pr-7-demo", guidance: "locked"
+    )
+    dispatcher.define_singleton_method(:dispatch) do |**_kw|
+      Hive::Attempts::DispatchResult.new(
+        status: :deferred, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "task_locked", reconciliation: busy_rec
+      )
+    end
+    busy_err = assert_raises(Hive::Attempts::ReconciliationBusy) do
+      entrypoint.dispatch(task: task, intended_stage: "6-review", argv: %w[hive run pr-7-demo])
+    end
+    assert_kind_of Hive::ConcurrentRunError, busy_err
+    assert_equal busy_rec, busy_err.reconciliation
+
+    reopened_rec = Hive::InternalPrCheckout::Result.new(
+      status: "reopened", reason: "head_changed", task_slug: "pr-7-demo",
+      pr_number: 7, pr_url: "https://github.com/acme/repo/pull/7",
+      generation: 2, head_oid: "b" * 40, previous_head_oid: "a" * 40, checkout_digest: "e" * 64
+    )
+    attempt = Struct.new(:attempt_id).new("attempt-pr-reopen")
+    dispatcher.define_singleton_method(:dispatch) do |**_kw|
+      Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil,
+        attach_descriptor: { "attempt_id" => "attempt-pr-reopen" },
+        reason: nil, reconciliation: reopened_rec
+      )
+    end
+    client = Object.new
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :terminal, exit_status: 0, outcome: "succeeded",
+        receipt: {}, attempt_id: id
+      )
+    end
+    attached = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, client: client
+    ).dispatch(task: task, intended_stage: "6-review", argv: %w[hive run pr-7-demo])
+    assert_equal reopened_rec, attached.reconciliation
+  end
 end

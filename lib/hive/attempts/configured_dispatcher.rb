@@ -26,29 +26,37 @@ module Hive
       end
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider: nil,
-                   interactive: true, now: Time.now.utc, subject: nil)
+                   interactive: true, now: Time.now.utc, subject: nil,
+                   reconcile_mode: nil, reconcile_deadline: nil)
         cfg = @config_loader.call(task.project_root)
         reconcile_proposals(task)
-        dispatcher_for(task, argv: argv, cfg: cfg).dispatch(
+        kwargs = {
           task: task, project: project, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider || provider_for(cfg, intended_stage),
           interactive: interactive, now: now, subject: subject
-        )
+        }
+        kwargs[:reconcile_mode] = reconcile_mode unless reconcile_mode.nil?
+        kwargs[:reconcile_deadline] = reconcile_deadline unless reconcile_deadline.nil?
+        dispatcher_for(task, argv: argv, cfg: cfg).dispatch(**kwargs)
       end
 
       def dispatch_request(request, interactive: false, now: Time.now.utc,
                            admission_view: nil, replay_semantic_terminal: false,
-                           agent_failure_retry: false)
+                           agent_failure_retry: false, reconcile_mode: nil,
+                           reconcile_deadline: nil)
         task = Hive::TaskResolver.new(
           request.slug, project_filter: request.project
         ).resolve
         reconcile_proposals(task)
-        dispatcher_for(task, argv: request.argv).dispatch_request(
-          request, interactive: interactive, now: now,
+        kwargs = {
+          interactive: interactive, now: now,
           admission_view: admission_view,
           replay_semantic_terminal: replay_semantic_terminal,
           agent_failure_retry: agent_failure_retry
-        )
+        }
+        kwargs[:reconcile_mode] = reconcile_mode unless reconcile_mode.nil?
+        kwargs[:reconcile_deadline] = reconcile_deadline unless reconcile_deadline.nil?
+        dispatcher_for(task, argv: request.argv).dispatch_request(request, **kwargs)
       end
 
       def routing_decision_for_request(request, now: Time.now.utc, admission_view: nil)

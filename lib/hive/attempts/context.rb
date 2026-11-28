@@ -15,7 +15,8 @@ module Hive
       ENV_PREFIX = "HIVE_ATTEMPT_"
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token, :command_context, :remote_authority, :proposal_binding
+                  :progress_token, :command_context, :remote_authority, :proposal_binding,
+                  :pr_observation, :last_reconciliation
 
       class << self
         def current
@@ -84,6 +85,7 @@ module Hive
             routing: record["routing"],
             command_context: writable_command_context,
             remote_authority: remote_authority,
+            pr_observation: record["diagnostics"].is_a?(Hash) ? record["diagnostics"]["internal_pr_observation"] : nil,
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
           )
@@ -263,7 +265,7 @@ module Hive
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
                      progress_token: nil, command_context: nil, remote_authority: nil,
-                     proposal_binding: nil)
+                     proposal_binding: nil, pr_observation: nil)
         @attempt_id = attempt_id.to_s
         @task_generation = Integer(task_generation)
         @ownership_generation = ownership_generation&.to_s
@@ -277,6 +279,10 @@ module Hive
         @proposal_binding = if proposal_binding
           deep_freeze(Hive::StringifyKeys.call(proposal_binding))
         end
+        @pr_observation = if pr_observation.is_a?(Hash)
+          deep_freeze(Hive::StringifyKeys.call(pr_observation))
+        end
+        @last_reconciliation = nil
         @evidence_writer = evidence_writer
         @diagnostic_writer = diagnostic_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
@@ -322,6 +328,8 @@ module Hive
       def validate_generation!(task)
         return true if @generation_validated
 
+        verify_internal_pr_checkout_under_lease!(task)
+
         require "hive/attempts/generation"
         generation_options = {
           task: task, project: project, intended_stage: intended_stage
@@ -344,6 +352,34 @@ module Hive
       end
 
       private
+
+      def verify_internal_pr_checkout_under_lease!(task)
+        return unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+        stage = task.respond_to?(:stage_name) ? task.stage_name.to_s : File.basename(File.dirname(task.folder.to_s))
+        return unless %w[review 6-review].include?(stage)
+
+        require "hive/internal_pr_checkout"
+        return unless Hive::InternalPrCheckout.applicable?(task)
+
+        result = Hive::InternalPrCheckout.reconcile(
+          task: task, mode: :local_verify, lock_held: true
+        )
+        @last_reconciliation = result
+        return if result.proceed? || result.not_applicable?
+
+        if result.busy? || result.retryable
+          raise ReconciliationBusy.new(
+            "durable attempt #{attempt_id} internal PR checkout verification deferred (#{result.reason}): #{result.guidance}",
+            reconciliation: result
+          )
+        end
+
+        raise ReconciliationBlocked.new(
+          "durable attempt #{attempt_id} internal PR checkout verification blocked (#{result.reason}): #{result.guidance}",
+          reconciliation: result
+        )
+      end
 
       def deep_freeze(value)
         case value

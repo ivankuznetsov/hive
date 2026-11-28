@@ -25,7 +25,8 @@ module Hive
 
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
                    provider: nil, interactive: true, now: Time.now.utc,
-                   proposal_admission: nil)
+                   proposal_admission: nil, reconcile_mode: :explicit_reopen,
+                   reconcile_deadline: nil)
         store = @store ||= Repository.open_default
         dispatcher = @dispatcher ||= ConfiguredDispatcher.new(
           store: store, config_loader: @config_loader
@@ -35,7 +36,7 @@ module Hive
           task: task, intended_stage: intended_stage, provider: provider,
           admission: proposal_admission
         )
-        result = dispatcher.dispatch(
+        dispatch_kwargs = {
           task: task,
           project: project,
           intended_stage: intended_stage,
@@ -45,10 +46,33 @@ module Hive
           subject: subject,
           interactive: interactive,
           now: now
-        )
+        }
+        dispatch_kwargs[:reconcile_mode] = reconcile_mode unless reconcile_mode.nil?
+        dispatch_kwargs[:reconcile_deadline] = reconcile_deadline unless reconcile_deadline.nil?
+        result = dispatcher.dispatch(**dispatch_kwargs)
+        if result.status == :blocked && result.reconciliation
+          return result unless interactive
+
+          raise ReconciliationBlocked.new(
+            "internal PR checkout blocked for #{task.slug} (#{result.reason}): #{result.reconciliation.guidance}",
+            reconciliation: result.reconciliation
+          )
+        end
         if result.status == :deferred
+          if result.reconciliation
+            raise ReconciliationBusy.new(
+              "durable attempt deferred for #{task.slug}: #{result.reason} (#{result.reconciliation.guidance})",
+              reconciliation: result.reconciliation
+            )
+          end
           raise Hive::ConcurrentRunError,
                 "durable attempt deferred for #{task.slug}: #{result.reason}"
+        end
+        if result.status == :superseded
+          return result unless interactive
+
+          raise Hive::ConcurrentRunError,
+                "durable attempt superseded for #{task.slug}: #{result.reason}"
         end
         if result.status == :no_route
           receipt = request_admission_recovery(
@@ -67,7 +91,7 @@ module Hive
         return result unless interactive && result.attempt
 
         attached = (@client || Client.new(store: store)).attach(result.attempt.attempt_id)
-        attached
+        result.reconciliation ? attached.with(reconciliation: result.reconciliation) : attached
       end
 
       private

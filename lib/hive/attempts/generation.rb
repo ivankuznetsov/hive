@@ -23,9 +23,16 @@ module Hive
         progress = progress_token || artifact_token(
           task, admission_context: admission_context
         )
-        generation = ownership_generation || task_generation || ::Digest::SHA256.hexdigest(
+        derived = ::Digest::SHA256.hexdigest(
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )
+        supplied = ownership_generation || task_generation
+        if supplied && internal_pr_review_applicable?(task) && supplied.to_s != derived
+          require "hive/attempts/contracts"
+          raise Hive::Attempts::StaleTaskSource,
+                "supplied task_generation does not match current internal PR checkout generation"
+        end
+        generation = supplied || derived
         input_epoch = if task_input_epoch.nil?
           if intended_stage.to_s == "4-execute" # coding-scoped: increment 1 tracks input epochs for coding execute only
             workflow_policy = if task.respond_to?(:workflow)
@@ -56,6 +63,38 @@ module Hive
       end
 
       def self.artifact_token(task, state_file_content: nil, admission_context: nil)
+        if internal_pr_review_applicable?(task)
+          require "hive/internal_pr_checkout"
+          snapshot = Hive::InternalPrCheckout.read_only_snapshot(task) do |snap|
+            compute_artifact_token_bytes(
+              task,
+              state_file_content: state_file_content,
+              admission_context: admission_context,
+              checkout_digest: snap.head_transition_digest
+            )
+          end
+          if snapshot.blocked?
+            raise Hive::InternalPrCheckout::Error.new(
+              snapshot.reason, snapshot.guidance, retryable: snapshot.retryable
+            )
+          end
+          if snapshot.busy?
+            raise Hive::ConcurrentRunError, snapshot.guidance
+          end
+          return snapshot.sampled_value if snapshot.applicable?
+        end
+
+        compute_artifact_token_bytes(
+          task,
+          state_file_content: state_file_content,
+          admission_context: admission_context,
+          checkout_digest: nil
+        )
+      rescue SystemCallError, IOError => e
+        ::Digest::SHA256.hexdigest("hive-progress-v2\0unreadable\0#{e.class}\0#{task.state_file}")
+      end
+
+      def self.compute_artifact_token_bytes(task, state_file_content:, admission_context:, checkout_digest:)
         digest = ::Digest::SHA256.new
         digest << "hive-progress-v2\0"
         digest << task.state_file.to_s
@@ -78,10 +117,26 @@ module Hive
             task, **fingerprint_options
           )
         end
+        # R12: Legacy implicit generation 1 and initial gen 1 contribute zero
+        # bytes and no delimiter, preserving pre-deploy attempt identity.
+        if checkout_digest
+          digest << "\0internal-pr-checkout\0"
+          digest << checkout_digest.to_s
+        end
         digest.hexdigest
-      rescue SystemCallError, IOError => e
-        ::Digest::SHA256.hexdigest("hive-progress-v2\0unreadable\0#{e.class}\0#{task.state_file}")
       end
+      private_class_method :compute_artifact_token_bytes
+
+      def self.internal_pr_review_applicable?(task)
+        return false unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+        stage = task.respond_to?(:stage_name) ? task.stage_name.to_s : File.basename(File.dirname(task.folder.to_s))
+        return false unless %w[review 6-review].include?(stage)
+
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout.applicable?(task)
+      end
+      private_class_method :internal_pr_review_applicable?
 
       def self.current_task_input_epoch(task)
         folder = if task.respond_to?(:folder) && task.folder

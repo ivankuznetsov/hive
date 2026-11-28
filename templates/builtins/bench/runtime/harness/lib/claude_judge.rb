@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
-require "open3"
+require_relative "judge_process"
 require "json"
-require "lib/judge_output"
-require "lib/agent_limit"
+require_relative "judge_output"
+require_relative "agent_limit"
 
 module HiveBench
   # Production judge_fn for HiveBench::Judge, backed by the local claude CLI
@@ -36,14 +36,17 @@ module HiveBench
 
     # Returns a judge_fn: ->(prompt:, seed:) => { score:, reason: }.
     # model: nil uses whatever the operator's claude CLI defaults to; pass
-    # --judge-model to pin it. The `timeout` binary bounds a hung call.
+    # --judge-model to pin it.
     def judge_fn(bin: "claude", model: nil, timeout_s: DEFAULT_TIMEOUT)
       lambda do |prompt:, seed:|
         _ = seed
-        argv = [ "timeout", timeout_s.to_s, bin, "-p" ]
+        argv = [ bin, "-p" ]
         argv += [ "--model", model ] if model
-        out, err, status = Open3.capture3(*argv, stdin_data: prompt.to_s)
-        raise Error, "claude judge timed out after #{timeout_s}s" if status.exitstatus == 124
+        result = JudgeProcess.capture(argv, stdin_data: prompt.to_s, timeout: timeout_s)
+        failure = result.failure_message("claude", timeout_s)
+        raise Error, failure if failure
+
+        out, err, status = result.stdout, result.stderr, result.status
 
         unless status.success?
           if (limit_detail = trusted_limit_detail(out:, err:))

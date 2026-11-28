@@ -3,9 +3,19 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-27
+updated: 2026-11-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## Bench judge supervision on native macOS (2026-11-28)
+
+Native macOS validation is **pending owner-run**. Run both bench unit files
+and the bench workflow install integration test on a stock host. Check both
+fake CLIs on a PATH without GNU `timeout`, a hung judge with partial JSON,
+blocked stdin and inherited output, TERM-resistant descendants, refusal to
+signal unverified identities, and two simultaneous bench runs with an
+unrelated sentinel. The existing launchd job exercises service management.
+Linux coverage for judge supervision is in `test/unit/workflows/bench_judge_process_test.rb`.
 
 ## E2E binary fixture concurrency (2026-11-26)
 

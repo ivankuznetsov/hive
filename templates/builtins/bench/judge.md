@@ -87,6 +87,18 @@ require_bench_judge_runtime() {
     write_waiting "ERROR: the installed bench runtime at $BENCH_ROOT predates automatic judge retries or explicit Codex provider routing. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
     return 1
   fi
+
+  if ! type -P timeout >/dev/null && ! ruby -e '
+    begin
+      require File.join(ARGV.fetch(0), "harness/lib/judge_process")
+      exit(defined?(HiveBench::JudgeProcess::VERSION) && HiveBench::JudgeProcess::VERSION == 1 ? 0 : 1)
+    rescue LoadError
+      exit 1
+    end
+  ' "$BENCH_ROOT"; then
+    write_waiting "The pinned bench runtime needs GNU timeout for host judging, and the host PATH has no timeout. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
+    return 1
+  fi
 }
 
 if ! require_bench_judge_runtime; then

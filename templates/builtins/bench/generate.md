@@ -83,6 +83,18 @@ if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
   exit 0
 fi
 
+if ! type -P timeout >/dev/null && ! ruby -e '
+  begin
+    require File.join(ARGV.fetch(0), "harness/lib/judge_process")
+    exit(defined?(HiveBench::JudgeProcess::VERSION) && HiveBench::JudgeProcess::VERSION == 1 ? 0 : 1)
+  rescue LoadError
+    exit 1
+  end
+' "$BENCH_ROOT"; then
+  write_waiting "The pinned bench runtime needs GNU timeout for host judging, and the host PATH has no timeout. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
+  exit 0
+fi
+
 if [ ! -f campaign.yml ]; then
   write_waiting "Missing campaign.yml. Copy campaign.yml.example into this task folder, edit it, and commit it."
   exit 0

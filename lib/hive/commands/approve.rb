@@ -511,6 +511,9 @@ module Hive
                 ),
                 restore_review_budget_reset!(
                   task, new_folder, review_reset_snapshot, observation: observation
+                ),
+                resync_internal_pr_history_after_restore!(
+                  task, new_folder, review_archive_moves, review_reset_snapshot
                 )
               ].compact
               if rollback_issues.any?
@@ -595,6 +598,10 @@ module Hive
         end
         Hive::AtomicFile.fsync_directory(archive)
         Hive::AtomicFile.fsync_directory(reviews)
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout.sync_history_after_pass_archive!(
+          task: task, label: File.basename(relative)
+        )
       end
 
       def restore_review_budget_reset!(task, new_folder, snapshot, observation:)
@@ -639,7 +646,27 @@ module Hive
 
         label = "#{@clock.call.utc.strftime('%Y%m%dT%H%M%SZ')}-" \
                 "#{task.stage_index}-#{task.stage_name}-to-#{dest_stage}"
+        before_count = moves.length
         Hive::Stages::Review::PassArchive.archive!(task.folder, label: label, moves: moves)
+        if moves.length > before_count
+          require "hive/internal_pr_checkout"
+          created_label = File.basename(File.dirname(moves.last.last))
+          Hive::InternalPrCheckout.sync_history_after_pass_archive!(
+            task: task, label: created_label
+          )
+        end
+      end
+
+      def resync_internal_pr_history_after_restore!(task, new_folder, review_archive_moves, review_reset_snapshot)
+        return nil if review_archive_moves.empty? && review_reset_snapshot.empty?
+
+        folder = rollback_folder(task, new_folder)
+        rollback_task = Hive::Task.new(folder)
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout.sync_history_after_pass_archive!(task: rollback_task, restored: true)
+        nil
+      rescue StandardError => error
+        rollback_skip("internal PR review archive history sync", error)
       end
 
       def read_rewind_state_snapshot!(path, state_file)

@@ -45,6 +45,8 @@ module Hive
                      is_draft: nil, head_ref_name: nil, head_repository: nil, host: nil, repository: nil)
         super
       end
+
+      def head_oid = head_ref_oid
     end
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is

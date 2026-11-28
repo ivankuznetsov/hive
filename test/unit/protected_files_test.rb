@@ -265,4 +265,38 @@ class ProtectedFilesTest < Minitest::Test
       refute_path_exists path
     end
   end
+
+  def test_tree_inventory_digest_detects_deep_add_edit_symlink_and_enforces_limits
+    with_tmp_dir do |dir|
+      missing = Hive::ProtectedFiles.tree_inventory_digest(File.join(dir, "nope"))
+      assert_equal false, missing[:present]
+
+      root = File.join(dir, "archive")
+      FileUtils.mkdir_p(File.join(root, "gen-1", "sub"))
+      File.write(File.join(root, "gen-1", "sub", "a.txt"), "hello\n")
+
+      d1 = Hive::ProtectedFiles.tree_inventory_digest(root)
+      assert_equal true, d1[:present]
+      assert_equal 3, d1[:count]
+
+      File.write(File.join(root, "gen-1", "sub", "b.txt"), "extra\n")
+      d2 = Hive::ProtectedFiles.tree_inventory_digest(root)
+      refute_equal d1[:membership_digest], d2[:membership_digest]
+      refute_equal d1[:stat_digest], d2[:stat_digest]
+      File.unlink(File.join(root, "gen-1", "sub", "b.txt"))
+
+      File.unlink(File.join(root, "gen-1", "sub", "a.txt"))
+      File.symlink("/etc/hosts", File.join(root, "gen-1", "sub", "a.txt"))
+      d3 = Hive::ProtectedFiles.tree_inventory_digest(root)
+      refute_equal d1[:membership_digest], d3[:membership_digest]
+
+      assert_raises(Hive::ProtectedFiles::TreeLimitError) do
+        Hive::ProtectedFiles.tree_inventory_digest(root, max_depth: 1)
+      end
+
+      assert_raises(Hive::ProtectedFiles::TreeLimitError) do
+        Hive::ProtectedFiles.tree_inventory_digest(root, max_path_bytes: 5)
+      end
+    end
+  end
 end

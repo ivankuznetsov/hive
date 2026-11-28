@@ -162,6 +162,7 @@ module Hive
         # REVIEW_ERROR. The hive runner is single-task per process, so
         # cross-invocation contamination isn't a concern.
         @current_phase = :pre_flight
+        @current_task = task
         # Phase-level agent_start/agent_end pair tracking. Each
         # mark_working call closes the previously-open phase event
         # (if any) and emits a new one. The ensure block at the bottom
@@ -3095,6 +3096,28 @@ module Hive
         body << "# Fix completed for pass #{format('%02d', ctx.pass)}\n\n"
         body << "Recorded at #{Time.now.utc.iso8601}.\n"
         File.write(path, body)
+
+        if head.to_s.match?(/\A[0-9a-f]{40,64}\z/)
+          require "hive/internal_pr_checkout"
+          candidate_task = if @current_task && @current_task.folder == ctx.task_folder
+            @current_task
+          else
+            begin
+              Hive::Task.new(ctx.task_folder)
+            rescue Hive::InvalidTaskPath
+              nil
+            end
+          end
+          if candidate_task && Hive::InternalPrCheckout.applicable?(candidate_task)
+            Hive::InternalPrCheckout.record_candidate!(
+              task: candidate_task,
+              head_oid: head,
+              pass: ctx.pass,
+              kind: kind,
+              worktree_path: ctx.worktree_path
+            )
+          end
+        end
       end
 
       def fix_success_relative_path(pass)

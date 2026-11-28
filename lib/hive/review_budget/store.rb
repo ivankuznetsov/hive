@@ -53,6 +53,21 @@ module Hive
       def grants = records.first
 
       def archived_grant(token)
+        require "hive/internal_pr_checkout/store"
+        checkout_store = Hive::InternalPrCheckout::Store.new(@budget.folder)
+        indexed_bytes = checkout_store.lookup_archived_grant_bytes(token)
+        unless indexed_bytes == :not_indexed
+          matches = indexed_bytes.map do |bytes|
+            document = parse(bytes)
+            validate!(document, "review-grant-#{token}.json")
+            document
+          end
+          if matches.length > 1 && matches.uniq.length != 1
+            raise Refused.new("unsafe_state", "archived grant decision is ambiguous")
+          end
+          return matches.first
+        end
+
         archive = File.join(@budget.reviews, "archive")
         return nil unless directory!(archive, missing: true)
         directories = Dir.children(archive).sort
@@ -70,6 +85,9 @@ module Hive
           raise Refused.new("unsafe_state", "archived grant decision is ambiguous")
         end
         matches.first
+      rescue Hive::InternalPrCheckout::CustodyError => error
+        reason = error.reason == "custody_limit_exceeded" ? "evidence_limit" : "unsafe_state"
+        raise Refused.new(reason, error.message)
       end
 
       def write_grant!(document)

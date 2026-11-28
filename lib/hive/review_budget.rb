@@ -494,10 +494,24 @@ module Hive
 
     def worktree_evidence
       return nil unless task.respond_to?(:project_root) && task.project_root
-      pointer = Hive::Worktree.read_owned_pointer(folder, project_root: task.project_root,
-        slug: task.slug, expected_root: Hive::Worktree.canonical_root(task.project_root))
+      expected_path = nil
+      expected_branch = nil
+      require "hive/internal_pr_checkout/identity"
+      if Hive::InternalPrCheckout::Identity.applicable?(task, allow_any_stage: true)
+        identity = Hive::InternalPrCheckout::Identity.resolve!(task)
+        expected_path = identity.expected_worktree_path
+        expected_branch = identity.expected_branch
+      end
+      pointer = Hive::Worktree.read_owned_pointer(
+        folder,
+        project_root: task.project_root,
+        slug: task.slug,
+        expected_root: Hive::Worktree.canonical_root(task.project_root),
+        expected_path: expected_path,
+        expected_branch: expected_branch
+      )
       { "pointer" => self.class.canonical(pointer), "pointer_digest" => Digest::SHA256.hexdigest(store.read_regular(File.join(folder, "worktree.yml"), max_bytes: Hive::Worktree::STRICT_POINTER_MAX_BYTES)) }
-    rescue Hive::WorktreeError => error
+    rescue Hive::WorktreeError, Hive::InternalPrCheckout::Error => error
       raise Refused.new("worktree_unavailable", "review worktree ownership is unavailable: #{error.message}")
     end
 

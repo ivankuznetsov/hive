@@ -529,7 +529,7 @@ module Hive
     # draft-PR receipt fields, so these live repository checks provide the
     # equivalent ownership proof without breaking their recovery.
     def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:,
-                                expected_path: nil, expected_branch: nil)
+                                expected_path: nil, expected_branch: nil, allow_detached: false)
       pointer_path = File.join(task_folder, "worktree.yml")
       source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
         raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
@@ -580,7 +580,9 @@ module Hive
       raise WorktreeError, "worktree #{path} is not registered for this project" unless registered.include?(path)
 
       checked_out = run_materialize_git!(path, "branch", "--show-current").strip
-      raise WorktreeError, "worktree #{path} is on branch #{checked_out.inspect}, expected #{branch}" unless checked_out == branch
+      unless checked_out == branch || (allow_detached && checked_out.empty?)
+        raise WorktreeError, "worktree #{path} is on branch #{checked_out.inspect}, expected #{branch}"
+      end
 
       project_common = git_common_dir(project_root)
       worktree_common = git_common_dir(path)

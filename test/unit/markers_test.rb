@@ -718,4 +718,42 @@ class MarkersTest < Minitest::Test
       assert_raises(ArgumentError) { Hive::Markers.set(file, :review_typo) }
     end
   end
+
+  def test_remove_named_markers_strips_embedded_review_markers_preserving_steering_and_prose
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, <<~MD)
+        ---
+        id: "0042"
+        source: ad-hoc
+        ---
+        # Operator Notes
+        Keep this line byte-for-byte.
+        <!-- REVIEW_COMPLETE pass=1 browser=passed -->
+        <!-- AGENT_WORKING pid=999 started=2026-08-29T12:00:00Z -->
+        Keep trailing prose.
+        <!-- REVIEW_WAITING reason=escalations pass=1 -->
+      MD
+
+      changed = Hive::Markers.remove_named_markers(
+        file, Hive::Markers::REVIEW_MARKER_NAMES, refuse_if_current: [ :manual_steering ]
+      )
+      assert_equal :removed, changed
+      after = File.read(file)
+      refute_includes after, "REVIEW_COMPLETE"
+      refute_includes after, "REVIEW_WAITING"
+      assert_includes after, "Keep this line byte-for-byte."
+      assert_includes after, "<!-- AGENT_WORKING pid=999 started=2026-08-29T12:00:00Z -->"
+      assert_includes after, "Keep trailing prose."
+
+      # Refuses when MANUAL_STEERING is active.
+      File.write(file, "prose\n<!-- MANUAL_STEERING agent=claude -->\n")
+      before = File.binread(file)
+      result = Hive::Markers.remove_named_markers(
+        file, Hive::Markers::REVIEW_MARKER_NAMES, refuse_if_current: [ :manual_steering ]
+      )
+      assert_equal :refused, result
+      assert_equal before, File.binread(file)
+    end
+  end
 end

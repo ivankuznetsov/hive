@@ -118,6 +118,26 @@ module Hive
         nil
       end
 
+      # Read-only idle/version probe for consistent projection bracketing.
+      # Release retains `lease_version` and the next claim increments it, so
+      # matching `{ idle: true, lease_version: v }` on both sides proves no
+      # lease-serialized transition ran during the read.
+      def lease_snapshot(task_folder)
+        folder = File.expand_path(task_folder.to_s)
+        subject = subject_for(folder)
+        row = read_row(subject.fetch(:task_id))
+        return { idle: true, lease_version: 0, holder_id: nil } unless row
+
+        live = row[:holder_id] && holder_alive?(row)
+        {
+          idle: !live,
+          lease_version: row.fetch(:lease_version),
+          holder_id: live ? row[:holder_id] : nil
+        }
+      rescue IdentityError, Errno::ENOENT
+        { idle: true, lease_version: 0, holder_id: nil }
+      end
+
       def active_leases(state_roots:, limit:)
         roots = Array(state_roots).map { |path| File.expand_path(path) }.uniq
         return [] if roots.empty?

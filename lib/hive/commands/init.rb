@@ -798,9 +798,9 @@ module Hive
           write_per_project_config(ops, content: content)
           install_builtin_workflow_runtime!(ops, workflow)
           ops.add_hive_state_to_master_gitignore!
-          Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
-          ops.commit_llm_wiki_bootstrap!
-          Hive::LlmWikiBootstrap.install_runtime_hooks!(@project_path, scheduler: !@minimal)
+          Hive::LlmWikiBootstrap.install!(@project_path, scheduler: !@minimal) do
+            ops.commit_llm_wiki_bootstrap!
+          end
 
           entry = Hive::Config.register_project(
             name: File.basename(@project_path),

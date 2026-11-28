@@ -140,9 +140,8 @@ end
 
 require "hive/llm_wiki_bootstrap"
 
-# The workflow creator owns two strict observation routes. They must stay
-# byte-for-byte no-write even when an upgraded binary would otherwise repair
-# scheduler units during process startup.
+# Keep scheduler migration outside routes that own a strict no-write contract,
+# including workflow validation and init previews.
 strict_no_write_route = Hive::RuntimeControlPlane::ActivationGate.strict_no_write_route?(ARGV) ||
   Hive::RuntimeControlPlane::OperationalInspection.active?
 

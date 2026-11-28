@@ -29,6 +29,7 @@ HIVE_SYSTEMD_USER_GATE_TESTS = %w[
   test/unit/bot/telegram_test.rb
   test/unit/babysitter/project_tick_test.rb
   test/integration/systemd_user_service_offline_test.rb
+  test/integration/llm_wiki_systemd_user_test.rb
 ].freeze
 HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
@@ -338,7 +339,7 @@ Rake::TestTask.new("test:systemd_user_service" => "test:enable_systemd_user_gate
   t.libs << "lib"
   t.test_files = HIVE_SYSTEMD_USER_GATE_TESTS
   t.warning = false
-  t.description = "Run required systemd user-template and offline reconnect proofs"
+  t.description = "Run systemd user-template, offline reconnect and LLM-wiki path proofs"
 end
 
 HIVE_CI_GATE_TESTS.each do |qualified_name, test_file|

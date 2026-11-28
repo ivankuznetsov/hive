@@ -48,26 +48,26 @@ module Hive
 
     def install!(project_root, post_commit_hook: true, scheduler: true)
       project_root = File.expand_path(project_root)
-      validate_project_managed_paths!(project_root)
-      FileUtils.mkdir_p(File.join(project_root, ".llm-wiki"))
-
-      ensure_config(project_root)
-      ensure_project_wiki(project_root)
-      Context.install(project_root)
-      ensure_refresh_scripts(project_root)
-      ensure_shared_runtime(project_root)
-      ensure_post_commit_hook(project_root) if post_commit_hook
-      Scheduler.install(project_root) if scheduler
+      install_runtime_hooks!(project_root, scheduler: scheduler, post_commit_hook: post_commit_hook) do
+        ensure_project_wiki(project_root)
+        Context.install(project_root)
+        yield if block_given?
+      end
     end
 
-    def install_runtime_hooks!(project_root, scheduler: true)
+    def install_runtime_hooks!(project_root, scheduler: true, post_commit_hook: true)
       project_root = File.expand_path(project_root)
       validate_project_managed_paths!(project_root)
+      scheduled = scheduler && !Scheduler.scheduler_disabled?
+      eligible = Scheduler.bootstrap_allowed?(project_root) if scheduled
+
       ensure_config(project_root)
       ensure_refresh_scripts(project_root)
-      ensure_shared_runtime(project_root)
-      ensure_post_commit_hook(project_root)
-      Scheduler.install(project_root) if scheduler
+      yield if block_given?
+
+      ensure_shared_runtime(project_root) unless scheduled
+      ensure_post_commit_hook(project_root) if post_commit_hook
+      Scheduler.install(project_root) if scheduled && eligible
     end
 
     def validate_project_managed_paths!(project_root)
@@ -222,6 +222,12 @@ module Hive
         raise ArgumentError, "cannot resolve primary Git worktree for #{project_root}: #{err.strip}"
       end
 
+      # With --separate-git-dir Git lists the metadata directory as the first
+      # worktree. The primary checkout's gitfile identifies it unambiguously.
+      if File.file?(File.join(project_root, ".git"))
+        dir, _, git_status = Open3.capture3("git", "-C", project_root, "rev-parse", "--absolute-git-dir")
+        return File.expand_path(project_root) if git_status.success? && dir.delete_suffix("\n") == primary
+      end
       File.expand_path(primary)
     end
 
@@ -251,11 +257,13 @@ module Hive
       out, err, status = Open3.capture3(
         "git", "-C", project_root, "rev-parse", "--path-format=absolute", "--git-common-dir"
       )
-      unless status.success? && !out.strip.empty?
+      path = out.delete_suffix("\n")
+      unless status.success? && path.dup.force_encoding(Encoding::UTF_8).valid_encoding? &&
+             path.start_with?("/") && !path.match?(/[\0\r\n]/)
         raise ArgumentError, "cannot resolve Git common directory for #{project_root}: #{err.strip}"
       end
 
-      File.expand_path(out.strip, project_root)
+      path
     end
 
     def project_slug(project_root)

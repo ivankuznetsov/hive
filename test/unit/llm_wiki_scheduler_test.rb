@@ -28,20 +28,83 @@ class LlmWikiSchedulerTest < Minitest::Test
       assert_equal Hive::LlmWikiBootstrap::Scheduler.project_slug(main),
                    Hive::LlmWikiBootstrap::Scheduler.project_slug(linked)
       service = File.read(services.first)
-      encoded_main = Hive::LlmWikiBootstrap::Scheduler.systemd_path(main)
-      encoded_linked = Hive::LlmWikiBootstrap::Scheduler.systemd_path(linked)
-      assert_includes service, "WorkingDirectory=#{encoded_main}"
+      encoded_main = historical_word(main)
+      encoded_linked = historical_word(linked)
+      assert_includes service, "WorkingDirectory=#{main}"
       assert_includes service, "MemoryMax=4G"
       assert_includes service, "MemorySwapMax=0"
       assert_includes service, "X-HiveManaged=yes"
       assert_includes service, "Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1"
       shared_runner = File.join(main, ".git", "llm-wiki", "post-commit-refresh.sh")
-      assert_includes service, "ConditionFileIsExecutable=#{scheduler_path(shared_runner)}"
-      assert_includes service, "#{scheduler_path(shared_runner)} --project #{encoded_main} --drain"
+      assert_includes service, "ConditionFileIsExecutable=#{shared_runner}"
+      assert_includes service, "#{historical_word(shared_runner)} --project #{encoded_main} --drain"
       assert File.executable?(shared_runner)
       assert_equal File.basename(services.first),
                    File.read(File.join(main, ".git", "llm-wiki", "scheduler-service")).strip
       refute_includes service, encoded_linked
+    end
+  end
+
+  def test_service_preserves_literal_directives_and_encodes_each_command_word
+    [
+      [ "wiki test", "wiki test", 'wiki\x20test' ],
+      [ '\x20\x22\x41', '\x20\x22\x41', '\x5cx20\x5cx22\x5cx41' ],
+      [ "a\\\\b'\"", "a\\\\b'\"", 'a\x5c\x5cb\x27\x22' ],
+      [ "%t%%$$${NAME}é", "%%t%%%%$$${NAME}é", "%%t%%%%$$${NAME}é" ],
+      [ "a\tb", "a\tb", 'a\x09b' ]
+    ].each do |name, directive, word|
+      unit = Hive::LlmWikiBootstrap::Scheduler.systemd_service(
+        "/tmp/#{name}", "probe.service", flock_path: "/bin/fl%ock"
+      ).lines(chomp: true)
+      assert_includes unit, "X-HivePathEncoding=literal-v1"
+      assert_includes unit, "WorkingDirectory=/tmp/#{directive}"
+      assert_includes unit, "ConditionFileIsExecutable=/tmp/#{directive}/.llm-wiki/refresh-wiki.sh"
+      assert_includes unit, "ExecStart=:/bin/fl%%ock --nonblock --conflict-exit-code 0 " \
+                            "%t/llm-wiki-refresh.lock /tmp/#{word}/.llm-wiki/refresh-wiki.sh --project /tmp/#{word} --drain"
+    end
+  end
+
+  def test_unrepresentable_roots_fail_before_installation
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      [ "nul\0", "line\nbreak", "cr\r", "bad\xff", "end\\", "end ", "end\t" ].each do |name|
+        project = "#{root}/#{name}"
+        assert_raises(ArgumentError) do
+          Hive::LlmWikiBootstrap::Scheduler.systemd_service(project, "probe.service")
+        end
+        next if name.include?("\0")
+
+        run_git("init", "-q", project)
+        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
+        File.write(File.join(project, ".llm-wiki/config.json"), '{"created_by":"hive"}')
+        with_env("HOME" => home, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil) do
+          capture_io { Hive::LlmWikiBootstrap::Scheduler.install(project) }
+        end
+        refute_path_exists File.join(project, ".git/llm-wiki")
+        refute_path_exists home
+      end
+    end
+  end
+
+  def test_both_shared_runtime_writers_preserve_git_common_directory_trailing_space
+    with_tmp_dir do |root|
+      common = File.join(root, "metadata ")
+      sibling = common.rstrip
+      project = File.join(root, "wiki test")
+      run_git("init", "-q", "--separate-git-dir", common, project)
+      FileUtils.mkdir_p(sibling)
+      assert_equal common, Hive::LlmWikiBootstrap.git_common_dir(project)
+      Hive::LlmWikiBootstrap.install!(project, scheduler: false)
+      assert File.executable?(File.join(common, "llm-wiki/post-commit-refresh.sh"))
+      assert_empty Dir.children(sibling)
+      with_env("HOME" => root, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1") do
+        Hive::LlmWikiBootstrap::Scheduler.install(project)
+      end
+      service = File.read(Dir[File.join(root, ".config/systemd/user/*.service")].fetch(0))
+      assert_includes service, "WorkingDirectory=#{project}\n"
+      assert_includes service, "ConditionFileIsExecutable=#{common}/llm-wiki/post-commit-refresh.sh\n"
+      assert_includes service, "#{sibling}\\x20/llm-wiki/post-commit-refresh.sh --project "
+      assert_empty Dir.children(sibling)
     end
   end
 
@@ -54,12 +117,12 @@ class LlmWikiSchedulerTest < Minitest::Test
       legacy_service = "llm-wiki-#{legacy_slug}.service"
       legacy_timer = legacy_service.sub(/\.service\z/, ".timer")
       write_legacy_unit(user_dir, legacy_service, linked)
-      File.write(File.join(user_dir, legacy_timer), "[Timer]\nPersistent=true\n")
+      write_legacy_timer(user_dir, legacy_service)
       File.symlink(File.join("..", legacy_timer), File.join(wants_dir, legacy_timer))
 
-      stale_service = "llm-wiki-hive-test-stale.service"
+      stale_service = service_for("/tmp/hive-test-deleted-project")
       write_legacy_unit(user_dir, stale_service, "/tmp/hive-test-deleted-project")
-      File.write(File.join(user_dir, stale_service.sub(/\.service\z/, ".timer")), "[Timer]\n")
+      write_legacy_timer(user_dir, stale_service)
 
       with_env(
         "HOME" => home,
@@ -121,7 +184,7 @@ class LlmWikiSchedulerTest < Minitest::Test
       service = File.join(user_dir, "llm-wiki-raced.service")
       FileUtils.mkdir_p(user_dir)
       File.write(service, "placeholder\n")
-      original_read = File.method(:read)
+      original_read = File.method(:binread)
       raced_read = lambda do |path, *args, **kwargs|
         raise Errno::EACCES, path if path == service
 
@@ -133,7 +196,7 @@ class LlmWikiSchedulerTest < Minitest::Test
         "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil,
         "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1"
       ) do
-        with_replaced_singleton_method(File, :read, raced_read) do
+        with_replaced_singleton_method(File, :binread, raced_read) do
           Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
         end
       end
@@ -149,7 +212,7 @@ class LlmWikiSchedulerTest < Minitest::Test
       timer = File.join(user_dir, "llm-wiki-raced.timer")
       FileUtils.mkdir_p(user_dir)
       File.write(timer, "[Unit]\nX-HiveManaged=yes\n")
-      original_read = File.method(:read)
+      original_read = File.method(:binread)
       raced_read = lambda do |path, *args, **kwargs|
         raise Errno::EACCES, path if path == timer
 
@@ -161,7 +224,7 @@ class LlmWikiSchedulerTest < Minitest::Test
         "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil,
         "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1"
       ) do
-        with_replaced_singleton_method(File, :read, raced_read) do
+        with_replaced_singleton_method(File, :binread, raced_read) do
           Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
         end
       end
@@ -192,10 +255,10 @@ class LlmWikiSchedulerTest < Minitest::Test
       FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
       FileUtils.mkdir_p(user_dir)
       File.write(File.join(project, ".llm-wiki", "config.json"), "{\"created_by\":\"hive\"}\n")
-      service = "llm-wiki-broken-project.service"
+      service = service_for(project)
       timer = service.sub(/\.service\z/, ".timer")
       write_legacy_unit(user_dir, service, project)
-      File.write(File.join(user_dir, timer), "[Timer]\nPersistent=true\n")
+      write_legacy_timer(user_dir, service)
 
       with_env(
         "HOME" => home,
@@ -241,10 +304,10 @@ class LlmWikiSchedulerTest < Minitest::Test
     with_scheduler_fixture do |home, main, _linked|
       user_dir = File.join(home, ".config", "systemd", "user")
       FileUtils.mkdir_p(user_dir)
-      service = "llm-wiki-disabled.service"
+      service = service_for(main)
       timer = service.sub(/\.service\z/, ".timer")
       write_legacy_unit(user_dir, service, main)
-      File.write(File.join(user_dir, timer), "[Timer]\nPersistent=true\n")
+      write_legacy_timer(user_dir, service)
 
       with_env(
         "HOME" => home,
@@ -256,8 +319,7 @@ class LlmWikiSchedulerTest < Minitest::Test
       canonical_service = canonical.sub(/\.timer\z/, ".service")
       assert_path_exists File.join(user_dir, canonical)
       assert_path_exists File.join(user_dir, canonical_service)
-      refute_path_exists File.join(user_dir, service)
-      refute_path_exists File.join(user_dir, timer)
+      assert_includes File.read(File.join(user_dir, service)), "X-HivePathEncoding=literal-v1"
       refute File.symlink?(File.join(user_dir, "timers.target.wants", canonical))
     end
   end
@@ -267,10 +329,10 @@ class LlmWikiSchedulerTest < Minitest::Test
       home = File.join(root, "home")
       user_dir = File.join(home, ".config", "systemd", "user")
       FileUtils.mkdir_p(user_dir)
-      service = "llm-wiki-stale-test.service"
+      service = service_for("/tmp/hive-web-test-deleted/repo")
       timer = service.sub(/\.service\z/, ".timer")
       write_legacy_unit(user_dir, service, "/tmp/hive-web-test-deleted/repo")
-      File.write(File.join(user_dir, timer), "[Timer]\nPersistent=true\n")
+      write_legacy_timer(user_dir, service)
 
       with_env(
         "HOME" => home,
@@ -291,7 +353,7 @@ class LlmWikiSchedulerTest < Minitest::Test
       FileUtils.mkdir_p(user_dir)
       marked = "llm-wiki-marked.timer"
       ambiguous = "llm-wiki-ambiguous.timer"
-      File.write(File.join(user_dir, marked), "[Unit]\nX-HiveManaged=yes\n")
+      File.write(File.join(user_dir, marked), "[Unit]\nX-HiveManaged=yes\n[Timer]\nUnit=llm-wiki-marked.service\n")
       File.write(File.join(user_dir, ambiguous), "[Timer]\nPersistent=true\n")
 
       with_env(
@@ -313,7 +375,7 @@ class LlmWikiSchedulerTest < Minitest::Test
       calls = File.join(home, "systemctl-calls")
       FileUtils.mkdir_p(user_dir)
       FileUtils.mkdir_p(fake_bin)
-      service = "llm-wiki-architecture-94f974d5.service"
+      service = service_for("/tmp/e2e-runs20260721-1589510-iozxyy/repos/architecture")
       write_legacy_unit(user_dir, service, "/tmp/e2e-runs20260721-1589510-iozxyy/repos/architecture")
       File.write(File.join(fake_bin, "systemctl"), <<~SH)
         #!/bin/sh
@@ -368,6 +430,269 @@ class LlmWikiSchedulerTest < Minitest::Test
     end
   end
 
+  def test_foreign_runner_and_mismatched_service_name_are_preserved
+    with_scheduler_fixture do |home, main, linked|
+      with_env("HOME" => home, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1") do
+        user_dir = File.join(home, ".config/systemd/user")
+        FileUtils.mkdir_p(user_dir)
+        service = service_for(main)
+        path = File.join(user_dir, service)
+        write_legacy_unit(user_dir, service, main)
+        bytes = File.read(path).sub("ExecStart=#{historical_word(main)}", "ExecStart=#{historical_word(linked)}")
+        File.write(path, bytes)
+        foreign = "llm-wiki-foreign.service"
+        write_legacy_unit(user_dir, foreign, linked)
+        Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+        assert_equal bytes, File.read(path)
+        assert_path_exists File.join(user_dir, foreign)
+        refute_path_exists File.join(main, ".git/llm-wiki")
+      end
+    end
+  end
+
+  def test_current_and_both_unmarked_grammars_prove_exact_root_and_converge_after_an_older_writer
+    with_scheduler_sandbox do |root, units, calls|
+      names = [ 'project\x20literal', "project literal", 'a"b', "a\\\\b", 'x\x41', "raw %t café", "plain" ]
+      names.each_with_index do |basename, index|
+        project = File.join(root, basename)
+        seed_project(project)
+        name = service_for(project)
+        path, _, link = Scheduler.unit_paths(units, name)
+        historical = historical_service(project, raw: [ 0, 4, 5 ].include?(index))
+        File.write(path, historical)
+        expected = [ 1, 2, 3 ].include?(index) ? :proven_legacy : :proven_unversioned_literal
+        proof = Scheduler.classify_service(path, Scheduler.executable_path("flock"))
+        assert_equal [ expected, project ], [ proof.disposition, proof.root ]
+        write_legacy_timer(units, name)
+        File.symlink("../#{File.basename(link)}", link) if index.even?
+      end
+
+      names.each do |basename|
+        project = File.join(root, basename)
+        File.write(File.join(project, "sentinel"), basename)
+      end
+      Scheduler.reconcile_existing!
+      migrated = snapshot_scheduler(root)
+      names.each_with_index do |basename, index|
+        project = File.join(root, basename)
+        path, _, link = Scheduler.unit_paths(units, service_for(project))
+        assert_equal project, Scheduler.classify_service(path, Scheduler.executable_path("flock")).root
+        assert_includes File.read(path), "WorkingDirectory=#{project.gsub('%', '%%')}\n"
+        assert_equal index.even?, File.symlink?(link)
+        assert_equal basename, File.read(File.join(project, "sentinel"))
+      end
+      Scheduler.reconcile_existing!
+      assert_equal migrated, snapshot_scheduler(root)
+      project = File.join(root, names.first)
+      path = File.join(units, service_for(project))
+      expected = File.binread(path)
+      File.write(path, historical_service(project, raw: true))
+      prior = calls.size
+      Scheduler.install(project)
+      assert_equal expected, File.binread(path)
+      assert_operator calls.size, :>, prior
+      after_restore = snapshot_scheduler(root)
+      Scheduler.install(project)
+      assert_equal after_restore, snapshot_scheduler(root)
+    end
+  end
+
+  def test_unresolved_service_evidence_preserves_every_artifact_including_pending_intent
+    with_scheduler_sandbox do |root, units, calls|
+      project = File.join(root, "mismatch root")
+      seed_project(project)
+      service = service_for(project)
+      path, _, link = Scheduler.unit_paths(units, service)
+      write_legacy_timer(units, service)
+      File.symlink("../#{File.basename(link)}", link)
+      File.write(File.join(units, Scheduler::PENDING), "earlier intent\n")
+      original = historical_service(project)
+      [
+        original.sub(/^WorkingDirectory=.*\n/, ""),
+        original.sub(/^WorkingDirectory=.*$/, "\\0\n\\0"),
+        original.sub("ConditionFileIsExecutable=/", "ConditionFileIsExecutable=/wrong"),
+        original.sub(" --project /", " --project /wrong"),
+        original.sub("lock /", "lock /wrong"),
+        original.sub("X-HiveManaged=yes", "X-HiveManaged=yes\nX-HivePathEncoding=unknown"),
+        original.sub("Description=", "Description=wrong"),
+        original.b + "\xff".b
+      ].each do |bytes|
+        File.binwrite(path, bytes)
+        before = snapshot_scheduler(root)
+        Scheduler.reconcile_existing!
+        Scheduler.install(project)
+        assert_equal before, snapshot_scheduler(root)
+        assert_empty calls
+      end
+      File.write(path, original)
+      config = File.join(project, ".llm-wiki/config.json")
+      [ '{"created_by":"other"}', %({"created_by":"hive","extra":"\xff"}).b ].each do |bytes|
+        File.binwrite(config, bytes)
+        before = snapshot_scheduler(root)
+        Scheduler.reconcile_existing!
+        assert_equal before, snapshot_scheduler(root)
+        assert_empty calls
+      end
+    end
+  end
+
+  def test_direct_install_and_linked_migration_preserve_occupied_destinations
+    with_scheduler_sandbox do |root, units, calls|
+      project = File.join(root, "primary")
+      linked = File.join(root, "linked")
+      seed_project(project)
+      run_git("-C", project, "add", ".")
+      run_git("-C", project, "-c", "user.email=test@example.org", "-c", "user.name=Test", "commit", "-qm", "seed")
+      run_git("-C", project, "worktree", "add", "-qb", "linked", linked)
+      source = service_for(linked)
+      write_legacy_unit(units, source, linked)
+      name = service_for(project)
+      service, timer, link = Scheduler.unit_paths(units, name)
+      shared = File.join(project, ".git/llm-wiki")
+      FileUtils.mkdir_p(shared)
+      record = File.join(shared, "scheduler-service")
+      File.write(record, "#{name}\n")
+      [
+        [ service, "foreign contents\n" ],
+        [ service, historical_service(project).sub(" --project /", " --project /wrong") ],
+        [ timer, "[Unit]\nX-HiveManaged=yes\n[Timer]\nUnit=foreign.service\n" ],
+        [ timer, "\xff".b ],
+        [ link, "regular file" ],
+        [ link, :foreign_link ],
+        [ link, :dangling ],
+        [ record, "unrelated.service\n" ]
+      ].each do |path, contents|
+        case contents
+        when :foreign_link then File.symlink(record, path)
+        when :dangling then File.symlink("../#{File.basename(timer)}", path)
+        else File.binwrite(path, contents)
+        end
+        before = snapshot_scheduler(root)
+        Scheduler.reconcile_existing!
+        Scheduler.install(linked)
+        assert_equal before, snapshot_scheduler(root), path
+        assert_empty calls
+        File.unlink(path)
+      end
+      File.write(record, "#{name}\n")
+      Scheduler.reconcile_existing!
+      assert_path_exists service
+      refute_path_exists File.join(units, source)
+      refute File.symlink?(link)
+      before = snapshot_scheduler(root)
+      Scheduler.install(linked)
+      assert_equal before, snapshot_scheduler(root)
+      # Reappearing enabled linked units respect the disabled primary.
+      write_legacy_unit(units, source, linked)
+      write_legacy_timer(units, source)
+      source_link = Scheduler.unit_paths(units, source).last
+      File.symlink("../#{File.basename(source_link)}", source_link)
+      Scheduler.reconcile_existing!
+      refute File.symlink?(link)
+      refute File.symlink?(source_link)
+      File.symlink("../#{File.basename(timer)}", link)
+      write_legacy_unit(units, source, linked)
+      Scheduler.reconcile_existing!
+      assert File.symlink?(link)
+      before = snapshot_scheduler(root)
+      Scheduler.install(project)
+      assert_equal before, snapshot_scheduler(root)
+    end
+  end
+
+  def test_disputed_linked_source_protects_a_marked_primary_timer_from_orphan_cleanup
+    with_scheduler_fixture do |home, main, linked|
+      with_env("HOME" => home, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil, "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1") do
+        units = Scheduler.systemd_user_dir
+        FileUtils.mkdir_p(File.join(units, "timers.target.wants"))
+        name = service_for(linked)
+        write_legacy_unit(units, name, linked)
+        source = File.join(units, name)
+        File.write(source, File.read(source).sub("ExecStart=/", "ExecStart=/wrong/"))
+        _, timer, link = Scheduler.unit_paths(units, service_for(main))
+        File.write(timer, Scheduler.systemd_timer(service_for(main)))
+        File.symlink("../#{File.basename(timer)}", link)
+        before = snapshot_scheduler(home)
+        Scheduler.reconcile_existing!
+        Scheduler.install(linked)
+        Scheduler.install(main)
+        assert_equal before, snapshot_scheduler(home)
+        refute_path_exists File.join(main, ".git/llm-wiki")
+      end
+    end
+  end
+
+  def test_malformed_stored_bytes_and_unrepresentable_legacy_root_do_not_block_independent_migration
+    with_scheduler_sandbox do |root, units, calls|
+      bad_root = File.join(root, "a-invalid")
+      space_root = File.join(root, "b-trailing ")
+      good_root = File.join(root, "z-good")
+      [ bad_root, space_root, good_root ].each do |project|
+        seed_project(project)
+        name = service_for(project)
+        write_legacy_unit(units, name, project)
+        write_legacy_timer(units, name)
+        _, _, link = Scheduler.unit_paths(units, name)
+        File.symlink("../#{File.basename(link)}", link)
+      end
+      bad_path = File.join(units, service_for(bad_root))
+      File.binwrite(bad_path, File.binread(bad_path) + "\xff".b)
+      before = snapshot_scheduler(root)
+      Scheduler.reconcile_existing!
+      after = snapshot_scheduler(root)
+      [ bad_root, space_root ].each do |project|
+        name = service_for(project)
+        assert_equal before.select { |p, _| p.include?(name.delete_suffix(".service")) },
+                     after.select { |p, _| p.include?(name.delete_suffix(".service")) }
+        refute_path_exists File.join(project, ".git/llm-wiki")
+        refute calls.flatten.any? { |call| call.include?(name.delete_suffix(".service")) }
+      end
+      assert_includes File.read(File.join(units, service_for(good_root))), "X-HivePathEncoding=literal-v1"
+    end
+  end
+
+  def test_retry_after_service_replacement_and_after_removal
+    with_scheduler_sandbox do |root, units, calls|
+      project = File.join(root, "project")
+      seed_project(project)
+      Scheduler.install(project)
+      name = service_for(project)
+      path, timer, = Scheduler.unit_paths(units, name)
+      marker = File.join(units, Scheduler::PENDING)
+      File.write(path, historical_service(project))
+      rename = File.method(:rename)
+      interrupted = lambda do |from, to|
+        rename.call(from, to)
+        raise IOError, "interrupted after service replacement" if to == path
+      end
+      calls.clear
+      with_replaced_singleton_method(File, :rename, interrupted) do
+        assert_raises(IOError) { Scheduler.reconcile_existing! }
+      end
+      assert_path_exists marker
+      assert_empty calls
+      assert_includes File.read(path), "X-HivePathEncoding=literal-v1"
+      Scheduler.reconcile_existing!
+      expected = [ [ "stop", name ], [ "daemon-reload" ], [ "start", File.basename(timer) ] ]
+      assert_equal expected, calls
+      refute_path_exists marker
+      Scheduler.reconcile_existing!
+      assert_equal expected, calls
+
+      FileUtils.remove_entry(File.join(project, ".git"))
+      fail_reload = lambda { |*args| raise "interrupted" if args == [ "daemon-reload" ] }
+      with_replaced_singleton_method(Scheduler, :run_systemctl!, fail_reload) do
+        assert_raises(RuntimeError) { Scheduler.reconcile_existing! }
+      end
+      refute_path_exists path
+      assert_path_exists marker
+      calls.clear
+      Scheduler.reconcile_existing!
+      assert_equal [ [ "daemon-reload" ] ], calls
+      refute_path_exists marker
+    end
+  end
+
   def test_resolution_failures_are_fail_closed
     scheduler = Hive::LlmWikiBootstrap::Scheduler
     failed = Struct.new(:success?).new(false)
@@ -408,10 +733,8 @@ class LlmWikiSchedulerTest < Minitest::Test
     end
   end
 
-  def test_systemd_path_round_trip_and_missing_systemctl_are_safe
+  def test_missing_systemctl_is_safe
     scheduler = Hive::LlmWikiBootstrap::Scheduler
-    path = '/tmp/a path/with"quote\\slash'
-    assert_equal path, scheduler.decode_systemd_path(scheduler.systemd_path(path))
     with_env("PATH" => "", "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => nil) do
       refute scheduler.run_systemctl("daemon-reload")
     end
@@ -449,6 +772,55 @@ class LlmWikiSchedulerTest < Minitest::Test
 
   private
 
+  Scheduler = Hive::LlmWikiBootstrap::Scheduler
+
+  def seed_project(root)
+    run_git("init", "-q", root)
+    FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+    File.write(File.join(root, ".llm-wiki/config.json"), '{"created_by":"hive"}')
+  end
+
+  def with_scheduler_sandbox
+    with_tmp_dir do |root|
+      units = File.join(root, ".config/systemd/user")
+      FileUtils.mkdir_p(File.join(units, "timers.target.wants"))
+      calls = []
+      with_env("HOME" => root, "HIVE_SKIP_LLM_WIKI_SCHEDULER" => nil) do
+        with_replaced_singleton_method(Scheduler, :run_systemctl, ->(*args) { calls << args }) do
+          yield root, units, calls
+        end
+      end
+    end
+  end
+
+  def snapshot_scheduler(root)
+    paths = Dir.glob(File.join(root, "{.config/systemd/user,*/.git/llm-wiki}/**/*"), File::FNM_DOTMATCH)
+    paths.reject { |path| File.directory?(path) && !File.symlink?(path) }.to_h do |path|
+      stat = File.lstat(path)
+      [ path, [ stat.mode, stat.mtime, stat.symlink? ? File.readlink(path) : Digest::SHA256.file(path).hexdigest ] ]
+    end
+  end
+
+  def historical_service(project, raw: false)
+    name = service_for(project)
+    runner = File.join(project, ".git/llm-wiki/post-commit-refresh.sh")
+    <<~UNIT
+      [Unit]
+      Description=Refresh LLM wiki for #{name.delete_suffix(".service")}
+      X-HiveManaged=yes
+      ConditionFileIsExecutable=#{raw ? runner : historical_word(runner)}
+
+      [Service]
+      Type=oneshot
+      Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1
+      WorkingDirectory=#{raw ? project : historical_word(project)}
+      ExecStart=#{historical_word(Scheduler.executable_path("flock"))} --nonblock --conflict-exit-code 0 %t/llm-wiki-refresh.lock #{historical_word(runner)} --project #{historical_word(project)} --drain
+      TimeoutStartSec=4h
+      MemoryMax=4G
+      MemorySwapMax=0
+    UNIT
+  end
+
   def with_scheduler_fixture
     with_tmp_dir do |root|
       home = File.join(root, "home")
@@ -473,13 +845,13 @@ class LlmWikiSchedulerTest < Minitest::Test
   end
 
   def write_legacy_unit(user_dir, service_name, project_root)
-    encoded_root = Hive::LlmWikiBootstrap::Scheduler.systemd_path(project_root)
+    encoded_root = historical_word(project_root)
     File.write(File.join(user_dir, service_name), <<~UNIT)
       [Unit]
       Description=Refresh LLM wiki for #{service_name.sub(/\.service\z/, "")}
       [Service]
       WorkingDirectory=#{encoded_root}
-      ExecStart=/usr/bin/flock --nonblock #{encoded_root}/.llm-wiki/refresh-wiki.sh
+      ExecStart=#{encoded_root}/.llm-wiki/refresh-wiki.sh
     UNIT
   end
 
@@ -488,7 +860,25 @@ class LlmWikiSchedulerTest < Minitest::Test
   end
 
 
-  def scheduler_path(path)
-    Hive::LlmWikiBootstrap::Scheduler.systemd_path(path)
+  def historical_word(path)
+    path.gsub(/[ "\\]/) { |char| format("\\x%02x", char.ord) }
+  end
+
+  def service_for(root)
+    basename = File.basename(root).gsub(/[^A-Za-z0-9_.-]/, "-")
+    "llm-wiki-#{basename}-#{Digest::SHA256.hexdigest(root)[0, 8]}.service"
+  end
+
+  def write_legacy_timer(user_dir, service)
+    File.write(File.join(user_dir, service.sub(/\.service\z/, ".timer")), <<~UNIT)
+      [Unit]
+      Description=Run #{service} daily
+      [Timer]
+      OnActiveSec=10min
+      OnUnitActiveSec=1d
+      Unit=#{service}
+      [Install]
+      WantedBy=timers.target
+    UNIT
   end
 end

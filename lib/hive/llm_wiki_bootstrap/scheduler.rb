@@ -13,166 +13,364 @@ module Hive
 
       UNIT_PREFIX = "llm-wiki-".freeze
 
+      UNIT_KEYS = {
+        "Unit" => %w[Description X-HiveManaged X-HivePathEncoding ConditionFileIsExecutable],
+        "Service" => %w[Type Environment WorkingDirectory ExecStart TimeoutStartSec MemoryMax MemorySwapMax],
+        "Timer" => %w[OnActiveSec OnBootSec OnUnitActiveSec RandomizedDelaySec Persistent Unit],
+        "Install" => %w[WantedBy]
+      }.freeze
+      PATH_ENCODING = "literal-v1".freeze
+      PENDING = ".hive-llm-wiki-reconcile-pending".freeze
+      Classification = Data.define(:disposition, :encoding, :root, :primary, :protected_services) do
+        def initialize(disposition:, encoding: nil, root: nil, primary: nil, protected_services: [])
+          super
+        end
+
+        def proven?
+          %i[current proven_unversioned_literal proven_legacy].include?(disposition)
+        end
+      end
+
+      # Bootstrap can create or replace the project config. An occupied unit
+      # must already have an owner before that evidence changes. The install
+      # pass inspects both ends again immediately before applying any writes.
+      def bootstrap_allowed?(project_root)
+        validate_path!(project_root)
+        config = File.join(project_root, ".llm-wiki/config.json")
+        return false if entry_type(config) && !hive_managed_root?(project_root)
+
+        path = File.join(systemd_user_dir, service_name(project_root))
+        !entry_type(path) || classify_service(path, executable_path("flock")).proven?
+      rescue SystemCallError, ArgumentError
+        false
+      end
+
       def install(project_root)
         return if scheduler_disabled?
 
-        project_root = scheduled_project_root(project_root)
-        return unless project_root
+        project_root = File.expand_path(project_root)
+        return unless bootstrap_allowed?(project_root)
+        primary = scheduled_project_root(project_root)
+        return unless primary && executable_path("flock")
 
-        flock_path = executable_path("flock")
-        return unless flock_path
-
-        user_dir = systemd_user_dir
-        FileUtils.mkdir_p(user_dir)
-        changed, timer_name, service_name = install_root(
-          project_root, user_dir, flock_path, enable_timer: true
-        )
-        changed_services = changed ? [ service_name ] : []
-        reconcile_existing!(
-          initial_change: changed,
-          additional_timers: [ timer_name ],
-          additional_services_to_stop: changed_services
-        )
+        reconcile(primary)
       rescue StandardError => e
         warn "hive: warning: could not activate LLM-wiki scheduler: #{e.message}"
       end
 
-      # Upgrade old path-keyed Hive units in place. This is intentionally safe
-      # to run at CLI startup: unchanged units do no I/O beyond inspection, and
-      # only units that point at Hive-managed projects (or dead paths) migrate.
-      def reconcile_existing!(initial_change: false, additional_timers: [], additional_services_to_stop: [])
-        return if scheduler_disabled?
+      def reconcile_existing!
+        reconcile(nil) unless scheduler_disabled?
+      end
 
-        user_dir = systemd_user_dir
-        return unless Dir.exist?(user_dir)
+      def reconcile(primary)
+        dir = systemd_user_dir
+        type = entry_type(dir)
+        return unless [ nil, "directory" ].include?(type)
+        unless type
+          # A rejected first install must leave even the unit directory absent.
+          return unless primary && Reconciliation.new(dir).prepare(primary)
 
-        flock_path = executable_path("flock")
-        pending_marker = File.join(user_dir, ".hive-llm-wiki-reconcile-pending")
-        recovering = File.exist?(pending_marker)
-        changed = initial_change || recovering
-        canonical_timers = Set.new(additional_timers)
-        services_to_stop = Set.new(additional_services_to_stop)
-        obsolete = []
+          FileUtils.mkdir_p(dir)
+        end
 
-        Dir[File.join(user_dir, "#{UNIT_PREFIX}*.service")].sort.each do |service_path|
-          contents = File.read(service_path)
-          next unless managed_service?(contents)
+        # Concurrent Hive startups share the directory inode, including across
+        # atomic unit replacements. No lock file is needed on an idle scan.
+        File.open(dir) do |directory|
+          directory.flock(File::LOCK_EX)
+          plan = Reconciliation.new(dir)
+          plan.apply if plan.prepare(primary)
+        end
+      end
 
-          configured_root = working_directory(contents)
-          if configured_root && Dir.exist?(configured_root)
-            next unless hive_owned_service?(contents, configured_root)
+      def service_name(root)
+        "#{UNIT_PREFIX}#{raw_project_slug(root)}.service"
+      end
 
-            canonical_root = scheduled_project_root(configured_root)
-            unless canonical_root && flock_path
-              obsolete << unit_paths(user_dir, File.basename(service_path))
-              next
-            end
+      def entry_type(path)
+        File.lstat(path).ftype
+      rescue Errno::ENOENT
+        nil
+      end
 
-            legacy_timer = File.basename(service_path).sub(/\.service\z/, ".timer")
-            enabled = timer_enabled?(user_dir, legacy_timer)
-            unit_changed, timer_name, canonical_service = install_root(
-              canonical_root, user_dir, flock_path, enable_timer: enabled
-            )
-            changed ||= unit_changed
-            canonical_timers << timer_name if enabled
-            services_to_stop << canonical_service if unit_changed || recovering
-            obsolete << unit_paths(user_dir, File.basename(service_path)) \
-              unless File.basename(service_path) == canonical_service
-          elsif configured_root.nil? || !Dir.exist?(configured_root)
-            next unless hive_managed_marker?(contents) || known_hive_test_root?(configured_root)
+      def install_outputs(root, flock)
+        name = service_name(root)
+        config = owned_config(root)
+        return unless config
 
-            obsolete << unit_paths(user_dir, File.basename(service_path))
+        shared = File.join(Hive::LlmWikiBootstrap.git_common_dir(root), "llm-wiki")
+        return unless shared_record_agrees?(shared, name)
+
+        runner = File.join(shared, "post-commit-refresh.sh")
+        service = systemd_service(root, name, flock_path: flock, refresh_script: runner)
+        {
+          runner => [ Scripts.post_commit_refresh, 0o755 ],
+          File.join(shared, "compile-log.sh") => [ Scripts.compile_log, 0o755 ],
+          File.join(shared, "config.json") => [ config, nil ],
+          File.join(shared, "scheduler-service") => [ "#{name}\n", nil ],
+          File.join(systemd_user_dir, name) => [ service, nil ],
+          File.join(systemd_user_dir, name.sub(/\.service\z/, ".timer")) => [ systemd_timer(name), nil ]
+        }
+      end
+
+      def shared_record_agrees?(shared, name)
+        return false unless [ nil, "directory" ].include?(entry_type(shared))
+
+        record = File.join(shared, "scheduler-service")
+        case entry_type(record)
+        when nil then true
+        when "file" then File.binread(record) == "#{name}\n".b
+        else false
+        end
+      end
+
+      # Read only the INI subset emitted by Hive. Keep every identity byte,
+      # including whitespace. Unsupported syntax and duplicate assignments
+      # cannot establish ownership of a replacement.
+      def unit_fields(path)
+        raise ArgumentError unless entry_type(path) == "file"
+        text = File.binread(path).force_encoding(Encoding::UTF_8)
+        raise ArgumentError unless text.valid_encoding? && !text.match?(/[\0\r]/)
+
+        section = nil
+        fields = {}
+        text.each_line(chomp: true) do |line|
+          next if line.empty? || line.start_with?("#", ";")
+          raise ArgumentError if line.end_with?("\\")
+          if line.match?(/\A\[(Unit|Service|Timer|Install)\]\z/)
+            section = line[1...-1]
+            next
           end
-        rescue Errno::ENOENT, Errno::EACCES
-          next
+          key, separator, value = line.partition("=")
+          raise ArgumentError unless section && !separator.empty? && UNIT_KEYS.fetch(section).include?(key)
+
+          location = [ section, key ]
+          raise ArgumentError if fields.key?(location)
+
+          fields[location] = value
         end
-
-        # A service may have been deleted independently. Only remove orphaned
-        # timers carrying Hive's explicit marker; legacy timer-only files are
-        # ambiguous and belong to their original installer until proven
-        # otherwise.
-        Dir[File.join(user_dir, "#{UNIT_PREFIX}*.timer")].sort.each do |timer_path|
-          service_path = timer_path.sub(/\.timer\z/, ".service")
-          next if File.exist?(service_path)
-
-          contents = File.read(timer_path)
-          next unless hive_managed_marker?(contents)
-
-          obsolete.concat(timer_paths(user_dir, File.basename(timer_path)))
-        rescue Errno::ENOENT, Errno::EACCES
-          next
-        end
-
-        obsolete.flatten!(1)
-        obsolete.uniq!
-        obsolete_timers = obsolete.filter_map do |path|
-          next unless path.end_with?(".timer") && !path.include?("timers.target.wants")
-
-          timer_name = File.basename(path)
-          timer_name if File.exist?(path) || timer_enabled?(user_dir, timer_name)
-        end
-        obsolete_services = obsolete.filter_map do |path|
-          File.basename(path) if path.end_with?(".service")
-        end
-        planned_change = changed || !obsolete.empty?
-        return unless planned_change
-
-        write_if_changed(pending_marker, "pending\n")
-        obsolete_timers.each { |name| run_systemctl!("disable", "--now", name) }
-        services_to_stop.merge(obsolete_services)
-        services_to_stop.each { |name| run_systemctl!("stop", name) }
-        obsolete.each do |path|
-          next unless File.exist?(path) || File.symlink?(path)
-
-          FileUtils.rm_f(path)
-          changed = true
-        end
-
-        run_systemctl!("daemon-reload")
-        canonical_timers.sort.each { |name| run_systemctl!("start", name) }
-        FileUtils.rm_f(pending_marker)
+        fields
       end
 
-      def install_root(project_root, user_dir, flock_path, enable_timer:)
-        slug = raw_project_slug(project_root)
-        service_name = "#{UNIT_PREFIX}#{slug}.service"
-        timer_name = "#{UNIT_PREFIX}#{slug}.timer"
-        refresh_script, runtime_changed = deploy_shared_runtime(project_root, service_name: service_name)
-        service_changed = write_if_changed(
-          File.join(user_dir, service_name),
-          systemd_service(
-            project_root,
-            service_name,
-            flock_path: flock_path,
-            refresh_script: refresh_script
-          )
-        )
-        changed = runtime_changed || service_changed
-        changed = write_if_changed(
-          File.join(user_dir, timer_name),
-          systemd_timer(service_name)
-        ) || changed
-        changed = enable_timer_symlink(user_dir, timer_name) || changed if enable_timer
-        [ changed, timer_name, service_name ]
+      def classify_service(path, flock)
+        protected_services = []
+        fields = unit_fields(path)
+        name = File.basename(path)
+        description = "Refresh LLM wiki for #{name.delete_suffix('.service')}"
+        marker = fields[[ "Unit", "X-HiveManaged" ]]
+        version = fields[[ "Unit", "X-HivePathEncoding" ]]
+        return Classification.new(disposition: :unowned, encoding: version) unless fields[[ "Unit", "Description" ]] == description
+        return Classification.new(disposition: :invalid, encoding: version) unless [ nil, "yes" ].include?(marker) &&
+          [ nil, PATH_ENCODING ].include?(version)
+        stored = fields.fetch([ "Service", "WorkingDirectory" ])
+        candidates = version ? [ stored.gsub("%%", "%") ] : [ stored, decode_legacy_path(stored) ].uniq
+        proofs = candidates.filter_map do |root|
+          next unless name == service_name(root)
+          validate_path!(root)
+          next if Dir.exist?(root) && !executable_path("git")
+          primary = scheduled_project_root(root) if Dir.exist?(root)
+          # A matching basename identifies a possible destination to protect,
+          # even when the remaining fields cannot authorize a migration.
+          protected_services << service_name(primary) if primary
+          common = primary ? Hive::LlmWikiBootstrap.git_common_dir(root) : File.join(root, ".git")
+          config = File.join(root, ".llm-wiki/config.json")
+          owned = if entry_type(config)
+            hive_managed_root?(root)
+          else
+            !Dir.exist?(root) && known_hive_test_root?(root)
+          end
+          next unless owned && shared_record_agrees?(File.join(common, "llm-wiki"), service_name(primary || root))
+
+          disposition = service_layout(fields, root, common, flock, version, marker)
+          Classification.new(disposition: disposition, encoding: version, root: root, primary: primary) if disposition
+        end
+        return proofs.first if proofs.one?
+
+        Classification.new(disposition: :ambiguous, encoding: version, protected_services: protected_services)
+      rescue SystemCallError, ArgumentError, KeyError
+        Classification.new(disposition: :invalid, encoding: version, protected_services: protected_services)
       end
 
-      def deploy_shared_runtime(project_root, service_name:)
-        shared_dir = File.join(Hive::LlmWikiBootstrap.git_common_dir(project_root), "llm-wiki")
-        refresh_script = File.join(shared_dir, "post-commit-refresh.sh")
-        changed = write_if_changed(
-          refresh_script,
-          Hive::LlmWikiBootstrap::Scripts.post_commit_refresh,
-          mode: 0o755
-        )
-        changed = write_if_changed(
-          File.join(shared_dir, "compile-log.sh"),
-          Hive::LlmWikiBootstrap::Scripts.compile_log,
-          mode: 0o755
-        ) || changed
-        config = File.binread(File.join(project_root, ".llm-wiki", "config.json"))
-        changed = write_if_changed(File.join(shared_dir, "config.json"), config) || changed
-        changed = write_if_changed(File.join(shared_dir, "scheduler-service"), "#{service_name}\n") || changed
-        [ refresh_script, changed ]
+      def service_layout(fields, root, common, flock, version, marker)
+        directory = fields.fetch([ "Service", "WorkingDirectory" ])
+        command = fields.fetch([ "Service", "ExecStart" ])
+        condition = fields[[ "Unit", "ConditionFileIsExecutable" ]]
+        local = File.join(root, ".llm-wiki/refresh-wiki.sh")
+        runner = File.join(common, "llm-wiki/post-commit-refresh.sh")
+        if version
+          return :current if marker == "yes" && directory == literal_path(root) && condition == literal_path(runner) &&
+            flock && command == flock_command(flock, runner, root)
+          return
+        end
+
+        if condition.nil?
+          return unless marker.nil? && directory == legacy_word(root) && command == legacy_word(local)
+        else
+          return unless marker == "yes" && flock
+          return unless [ runner, local ].any? do |script|
+            layout_matches = (directory == root && condition == script) ||
+              (directory == legacy_word(root) && condition == legacy_word(script))
+            layout_matches && %w[llm-wiki-refresh.lock hive-llm-wiki-refresh.lock].any? do |lock|
+              command == "#{legacy_word(flock)} --nonblock --conflict-exit-code 0 %t/#{lock} " \
+                "#{legacy_word(script)} --project #{legacy_word(root)} --drain"
+            end
+          end
+        end
+        directory == root ? :proven_unversioned_literal : :proven_legacy
+      end
+
+      def legacy_word(path)
+        path.gsub(/[ "\\]/) { |char| format("\\x%02x", char.ord) }
+      end
+
+      def decode_legacy_path(path)
+        path.gsub(/\\x(20|22|5c)/) { Regexp.last_match(1).hex.chr }
+      end
+      private_class_method :legacy_word, :decode_legacy_path
+
+      def compatible_timer?(path, service, orphan: false)
+        fields = unit_fields(path)
+        return false unless fields[[ "Timer", "Unit" ]] == service
+
+        marker = fields[[ "Unit", "X-HiveManaged" ]]
+        description = fields[[ "Unit", "Description" ]]
+        return false if description && description != "Run #{service} daily"
+
+        marker == "yes" || (!orphan && marker.nil? && description)
+      rescue SystemCallError, ArgumentError
+        false
+      end
+
+      class Reconciliation
+        include Scheduler
+
+        def initialize(dir)
+          @dir = dir
+          @flock = executable_path("flock")
+          @sources = {}
+          @destinations = Hash.new { |h, root| h[root] = [] }
+          @reserved = Set.new
+          @writes = {}
+          @links = {}
+          @retire = Set.new
+          @stop = Set.new
+          @start = Set.new
+          @unresolved = false
+        end
+
+        def prepare(requested_root)
+          marker_type = entry_type(File.join(@dir, PENDING))
+          return unless [ nil, "file" ].include?(marker_type)
+          @recovering = marker_type == "file"
+
+          names = Dir.exist?(@dir) ? Dir.children(@dir).select { |name| name.start_with?(UNIT_PREFIX) } : []
+          names.select { |name| name.end_with?(".service") }.sort.each do |name|
+            source = classify_service(File.join(@dir, name), @flock)
+            @sources[name] = source
+            @reserved.merge(source.protected_services)
+            if source.proven? && source.primary && @flock
+              @destinations[source.primary] << name
+            elsif source.proven? && !source.primary && safe_timer?(name)
+              @retire << name
+            else
+              @unresolved = true
+            end
+          end
+          @destinations[requested_root] if requested_root
+          @destinations.keys.group_by { |root| service_name(root) }.each do |name, roots|
+            vacant_claim = @reserved.add?(name)
+            @unresolved = true unless vacant_claim && roots.one? && plan_destination(roots.first, @destinations.fetch(roots.first))
+          end
+          @retire.subtract(@reserved)
+          names.select { |name| name.end_with?(".timer") }.each do |timer|
+            name = timer.delete_suffix(".timer") + ".service"
+            next if @sources.key?(name) || @reserved.include?(name)
+            if safe_timer?(name, orphan: true)
+              @retire << name
+            else
+              @unresolved = true
+            end
+          end
+          # A dangling wants entry is occupied too, even without either unit.
+          wants = File.join(@dir, "timers.target.wants")
+          if File.directory?(wants)
+            @unresolved ||= Dir.children(wants).any? do |name|
+              name.start_with?(UNIT_PREFIX) && name.end_with?(".timer") && !names.include?(name)
+            end
+          end
+          @writes.any? || @links.any? || @retire.any? || (@recovering && (!@unresolved || @stop.any?))
+        end
+
+        def plan_destination(root, sources)
+          name = service_name(root)
+          existing = @sources[name]
+          return false if existing && !(existing.proven? && existing.root == root)
+          return false unless (sources | [ name ]).all? { |source| safe_timer?(source) }
+
+          service, timer, link = unit_paths(@dir, name)
+          if existing || entry_type(timer)
+            enabled = File.symlink?(link)
+          else
+            states = sources.map { |source| File.symlink?(unit_paths(@dir, source).last) }.uniq
+            return false if states.size > 1
+            enabled = states.empty? || states.first
+          end
+
+          outputs = install_outputs(root, @flock)
+          return false unless outputs
+          changes = outputs.select do |path, (contents, mode)|
+            type = entry_type(path)
+            return false unless [ nil, "file" ].include?(type)
+
+            type.nil? || File.binread(path) != contents.b || (mode && (File.stat(path).mode & 0o777) != mode)
+          end
+          link_missing = enabled && !File.symlink?(link)
+          retiring = sources - [ name ]
+          @writes.merge!(changes)
+          @links[link] = "../#{File.basename(timer)}" if link_missing
+          @retire.merge(retiring)
+          changed = !changes.empty? || link_missing
+          @stop << File.basename(service) if changed || @recovering
+          @start << File.basename(timer) if enabled && (changed || @recovering || !retiring.empty?)
+          true
+        rescue SystemCallError, ArgumentError
+          false
+        end
+
+        def safe_timer?(name, orphan: false)
+          _, timer, link = unit_paths(@dir, name)
+          type = entry_type(timer)
+          return false if type && !compatible_timer?(timer, name, orphan: orphan)
+          return false unless [ nil, "directory" ].include?(entry_type(File.dirname(link)))
+
+          case entry_type(link)
+          when nil then true
+          when "link" then type == "file" && File.readlink(link) == "../#{File.basename(timer)}"
+          else false
+          end
+        rescue SystemCallError, ArgumentError
+          false
+        end
+
+        def apply
+          marker = File.join(@dir, PENDING)
+          write_if_changed(marker, "pending\n")
+          @writes.each { |path, (bytes, mode)| write_if_changed(path, bytes, mode: mode) }
+          @links.each do |path, target|
+            FileUtils.mkdir_p(File.dirname(path))
+            File.symlink(target, path)
+          end
+          removals = @retire.flat_map do |name|
+            service, timer, link = unit_paths(@dir, name)
+            Scheduler.run_systemctl!("disable", "--now", File.basename(timer)) if entry_type(timer)
+            @stop << name if entry_type(service)
+            [ link, timer, service ]
+          end
+          @stop.sort.each { |name| Scheduler.run_systemctl!("stop", name) }
+          removals.each { |path| File.unlink(path) if entry_type(path) }
+          Scheduler.run_systemctl!("daemon-reload")
+          @start.sort.each { |name| Scheduler.run_systemctl!("start", name) }
+          File.unlink(marker)
+        end
       end
 
       def write_if_changed(path, contents, mode: nil)
@@ -194,35 +392,24 @@ module Hive
         FileUtils.rm_f(tmp) if defined?(tmp) && tmp
       end
 
-      def enable_timer_symlink(user_dir, timer_name)
-        wants_dir = File.join(user_dir, "timers.target.wants")
-        link_path = File.join(wants_dir, timer_name)
-        FileUtils.mkdir_p(wants_dir)
-        return false if File.symlink?(link_path) && File.readlink(link_path) == File.join("..", timer_name)
-
-        FileUtils.rm_f(link_path)
-        File.symlink(File.join("..", timer_name), link_path)
-        true
-      end
-
       def systemd_service(project_root, service_name, flock_path: executable_path("flock"), refresh_script: nil)
         raise ArgumentError, "flock is required for the LLM-wiki scheduler" unless flock_path
 
         refresh_script ||= File.join(project_root, ".llm-wiki", "refresh-wiki.sh")
-        encoded_refresh_script = systemd_path(refresh_script)
-        encoded_project_root = systemd_path(project_root)
+        [ project_root, refresh_script, flock_path ].each { |path| validate_path!(path) }
 
         <<~UNIT
           [Unit]
           Description=Refresh LLM wiki for #{service_name.sub(/\.service\z/, "")}
           X-HiveManaged=yes
-          ConditionFileIsExecutable=#{encoded_refresh_script}
+          X-HivePathEncoding=#{PATH_ENCODING}
+          ConditionFileIsExecutable=#{literal_path(refresh_script)}
 
           [Service]
           Type=oneshot
           Environment=LLM_WIKI_GLOBAL_LOCK_HELD=1
-          WorkingDirectory=#{encoded_project_root}
-          ExecStart=#{systemd_path(flock_path)} --nonblock --conflict-exit-code 0 %t/llm-wiki-refresh.lock #{encoded_refresh_script} --project #{encoded_project_root} --drain
+          WorkingDirectory=#{literal_path(project_root)}
+          ExecStart=#{flock_command(flock_path, refresh_script, project_root)}
           # A scheduled drain may run three batches. Each batch permits a
           # 30-minute agent plus two independently bounded 15-minute QMD
           # phases, so the outer service must outlive that bounded worst case.
@@ -230,6 +417,11 @@ module Hive
           MemoryMax=4G
           MemorySwapMax=0
         UNIT
+      end
+
+      def flock_command(flock_path, refresh_script, project_root)
+        ":#{command_word(flock_path)} --nonblock --conflict-exit-code 0 %t/llm-wiki-refresh.lock " \
+          "#{command_word(refresh_script)} --project #{command_word(project_root)} --drain"
       end
 
       def systemd_timer(service_name)
@@ -249,16 +441,20 @@ module Hive
         UNIT
       end
 
-      def systemd_path(path)
-        path.gsub("\\", "\\x5c")
-            .gsub(" ", "\\x20")
-            .gsub("\"", "\\x22")
+      def validate_path!(path)
+        unless path.dup.force_encoding(Encoding::UTF_8).valid_encoding? &&
+               path.start_with?("/") && !path.match?(/[\x00-\x08\x0a-\x1f\x7f]|[\\ \t]\z/) &&
+               File.expand_path(path) == path
+          raise ArgumentError, "unrepresentable LLM-wiki scheduler pathname: #{path.inspect}"
+        end
       end
 
-      def decode_systemd_path(path)
-        path.gsub("\\x22", "\"")
-            .gsub("\\x20", " ")
-            .gsub("\\x5c", "\\")
+      def literal_path(path)
+        path.gsub("%", "%%")
+      end
+
+      def command_word(path)
+        literal_path(path).gsub(/[ \t"'\\]/) { |char| format("\\x%02x", char.ord) }
       end
 
       def project_slug(project_root)
@@ -277,34 +473,9 @@ module Hive
       # failures are fail-closed so a transient Git problem cannot recreate a
       # timer for every linked checkout.
       def scheduled_project_root(project_root)
-        expanded_root = File.expand_path(project_root)
-        out, _err, status = Open3.capture3(
-          "git", "-C", expanded_root, "worktree", "list", "--porcelain", "-z"
-        )
-        return unless status.success?
-
-        record = out.split("\0").find { |field| field.start_with?("worktree ") }
-        path = record&.delete_prefix("worktree ")
-        return if path.nil? || path.empty?
-
-        File.expand_path(path)
-      rescue Errno::ENOENT
+        Hive::LlmWikiBootstrap.primary_worktree_root(File.expand_path(project_root))
+      rescue Errno::ENOENT, ArgumentError
         nil
-      end
-
-      def managed_service?(contents)
-        hive_managed_marker?(contents) || (
-          contents.include?("Description=Refresh LLM wiki for llm-wiki-") &&
-          contents.match?(%r{^ExecStart=.*?/\.llm-wiki/refresh-wiki\.sh(?:\s|$)})
-        )
-      end
-
-      def hive_managed_marker?(contents)
-        contents.match?(/^X-HiveManaged=yes$/)
-      end
-
-      def hive_owned_service?(contents, project_root)
-        hive_managed_marker?(contents) || hive_managed_root?(project_root)
       end
 
       def known_hive_test_root?(project_root)
@@ -324,16 +495,21 @@ module Hive
         end
       end
 
-      def working_directory(contents)
-        encoded = contents[/^WorkingDirectory=(.+)$/, 1]
-        encoded && decode_systemd_path(encoded)
+      def hive_managed_root?(project_root)
+        !owned_config(project_root).nil?
       end
 
-      def hive_managed_root?(project_root)
-        config_path = File.join(project_root, ".llm-wiki", "config.json")
-        JSON.parse(File.read(config_path))["created_by"] == "hive"
-      rescue Errno::ENOENT, JSON::ParserError, TypeError
-        false
+      def owned_config(project_root)
+        path = File.join(project_root, ".llm-wiki/config.json")
+        return unless entry_type(File.dirname(path)) == "directory" && entry_type(path) == "file"
+
+        bytes = File.binread(path).force_encoding(Encoding::UTF_8)
+        return unless bytes.valid_encoding?
+
+        config = JSON.parse(bytes)
+        bytes if config.is_a?(Hash) && config["created_by"] == "hive"
+      rescue Errno::ENOENT, JSON::ParserError
+        nil
       end
 
       def unit_paths(user_dir, service_name)
@@ -343,17 +519,6 @@ module Hive
           File.join(user_dir, timer_name),
           File.join(user_dir, "timers.target.wants", timer_name)
         ]
-      end
-
-      def timer_paths(user_dir, timer_name)
-        [
-          File.join(user_dir, timer_name),
-          File.join(user_dir, "timers.target.wants", timer_name)
-        ]
-      end
-
-      def timer_enabled?(user_dir, timer_name)
-        File.symlink?(File.join(user_dir, "timers.target.wants", timer_name))
       end
 
       def executable_path(name)

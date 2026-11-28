@@ -12,12 +12,12 @@ class DoctorStorageAttributesTest < Minitest::Test
     @path = Hive::Paths.runtime_control_plane_path(@root)
   end
 
-  def doctor(json: true, env: { "HIVE_HOME" => @root })
+  def doctor(json: true, env: { "HIVE_HOME" => @root }, linux: true)
     out = StringIO.new
     inspector = Struct.new(:inspect).new([])
     command = Hive::Commands::Doctor.new(config: {}, environment: {}, project_root: nil,
                                          inspector: inspector, json: json, output: out)
-    code = with_env(env) { command.call }
+    code = with_env(env) { linux ? with_linux_storage { command.call } : command.call }
     [ code, command.rows, json ? JSON.parse(out.string) : out.string ]
   end
 
@@ -169,7 +169,7 @@ class DoctorStorageAttributesTest < Minitest::Test
     klass = Hive::RuntimeControlPlane::StorageAttributes
     storage = klass.new(path: @path, platform: "darwin", runner: ->(*) { flunk "unexpected probe" })
     with_replaced_singleton_method(klass, :new, -> { storage }) do
-      code, rows, = doctor
+      code, rows, = doctor(linux: false)
       assert_equal 0, code
       assert_equal "not_applicable", rows.find { |r| r[:label] == "runtime/sqlite-storage" }[:outcome]
     end

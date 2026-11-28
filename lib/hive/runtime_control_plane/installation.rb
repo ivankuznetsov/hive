@@ -5,6 +5,7 @@ require "hive/atomic_file"
 require "hive/runtime_identity"
 require "hive/runtime_control_plane"
 require "hive/daemon/activation_lock"
+require "hive/runtime_control_plane/storage_attributes"
 require "hive/runtime_control_plane/command_schema_installation"
 require "hive/runtime_control_plane/command_schema_writer_guard"
 
@@ -19,12 +20,13 @@ module Hive
 
       def setup(state_home: Hive::Paths.state_home, install_command_receipts: false,
                 rollback_package: CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
-                writer_guard: CommandSchemaWriterGuard, web_running: -> { false })
+                writer_guard: CommandSchemaWriterGuard, web_running: -> { false }, on_warning: Kernel.method(:warn))
         CommandSchemaInstallation.validate_coordinates!(rollback_package) if install_command_receipts
+        path = Hive::Paths.runtime_control_plane_path(state_home)
+        StorageAttributes.prepare(path: path, on_warning: on_warning)
         Hive::Daemon::ActivationLock.new(hive_home: state_home).synchronize do
           writer_guard.verify!(state_home: state_home, web_running: web_running) if
             install_command_receipts
-          path = Hive::Paths.runtime_control_plane_path(state_home)
           database = Database.new(path: path)
           diagnosis = database.diagnostics
           if diagnosis.status == :missing

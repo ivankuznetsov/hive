@@ -70,7 +70,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
       assert_equal "indeterminate", result[:outcome]
       assert_includes result[:message], "stat"
     end
-    [ "", "C", "---------------------- wrong-path", "garbage #{@root}" ].each do |bad|
+    [ "", "C", "---------------------- wrong-path", "garbage #{@root}", "#{'C' * 22} #{@root}" ].each do |bad|
       runner = ->(cmd, *args) { cmd == "lsattr" ? bad : @runner.call(cmd, *args) }
       assert_equal "indeterminate", storage(runner: runner).inspect_storage[:outcome]
     end
@@ -116,6 +116,24 @@ class RuntimeStorageAttributesTest < Minitest::Test
     result = storage(runner: runner).prepare
     assert_equal "warning", result[:outcome]
     assert_includes result[:message], "could not be verified"
+  end
+
+  def test_a_late_file_between_eligibility_checks_prevents_chattr
+    @flags[@root] = "----------------------"
+    empty = Dir.method(:empty?)
+    once = true
+    late_file = lambda do |path|
+      result = empty.call(path)
+      if once
+        once = false
+        File.write(File.join(path, "newcomer"), "")
+      end
+      result
+    end
+    with_replaced_singleton_method(Dir, :empty?, late_file) do
+      assert_equal "warning", storage.prepare[:outcome]
+    end
+    assert_empty @calls.select { |cmd, *| cmd == "chattr" }
   end
 
   def test_unsafe_and_populated_roots_are_preserved

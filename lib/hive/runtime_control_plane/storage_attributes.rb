@@ -47,6 +47,14 @@ module Hive
         def default_runner = @default_runner || method(:run_command)
       end
 
+      def self.prepare(path: Hive::Paths.runtime_control_plane_path, on_warning: Kernel.method(:warn))
+        evidence = new(path: path).prepare
+        if evidence[:remediation]
+          on_warning&.call("#{evidence[:message]} #{evidence[:remediation]}")
+        end
+        evidence
+      end
+
       def initialize(path: Hive::Paths.runtime_control_plane_path, platform: RUBY_PLATFORM,
                      runner: self.class.default_runner)
         @path = File.expand_path(path)
@@ -58,12 +66,11 @@ module Hive
       def inspect_storage
         root = inspect_path("directory", @root)
         paths = [ root ]
-        if root[:exists] && root[:outcome] != "unsafe"
+        if root[:file_type] == "directory"
           { "database" => "", "wal" => "-wal", "shm" => "-shm", "journal" => "-journal" }.each do |role, suffix|
             paths << inspect_path(role, @path + suffix)
           end
         end
-        root[:outcome] = "indeterminate" if root[:outcome] == "unsafe"
         aggregate(paths)
       end
 
@@ -98,7 +105,7 @@ module Hive
       private
 
       def path_evidence(role, path)
-        { role: role, path: path, exists: nil, filesystem: nil, nocow: nil,
+        { role: role, path: path, exists: nil, file_type: nil, filesystem: nil, nocow: nil,
           outcome: "indeterminate", reason: nil }
       end
 
@@ -107,10 +114,9 @@ module Hive
         status = lstat(path)
         row[:exists] = !status.nil?
         return row.merge(outcome: "absent") unless status
-        unless role == "directory" ? status.directory? : status.file?
-          return row.merge(outcome: role == "directory" ? "unsafe" : "indeterminate",
-                           reason: "lstat: unexpected file type")
-        end
+        row[:file_type] = status.ftype
+        expected_type = role == "directory" ? "directory" : "file"
+        return row.merge(reason: "lstat: unexpected file type") unless row[:file_type] == expected_type
         return row.merge(outcome: "not_applicable", reason: "non-Linux platform") unless @linux
 
         fs = probe("stat", "-f", "--format=%t %T", "--", path).chomp
@@ -122,7 +128,9 @@ module Hive
         if match[2] == "btrfs"
           output = probe("lsattr", "-d", path).chomp
           flags = /\A([-aAcCdDeEfFiIjmNPsStTuVx]{16,32})[ \t]+#{Regexp.escape(path)}\z/.match(output)
-          raise ProbeError, "lsattr returned an unrecognized attribute record" unless flags
+          unless flags && !flags[1].delete("-").chars.tally.any? { |_flag, count| count > 1 }
+            raise ProbeError, "lsattr returned an unrecognized attribute record"
+          end
 
           row[:nocow] = flags[1].include?("C")
           row[:outcome] = row[:nocow] ? "healthy" : "warning"

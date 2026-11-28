@@ -417,7 +417,7 @@ class StatusReadOnlyIntegrationTest < Minitest::Test
     @source_digest ||= begin
       paths = %w[
         Gemfile Gemfile.lock hive.gemspec bin lib schemas components/agent-cli-runtime
-        test/support/status_read_only.Dockerfile test/support/status_read_only_fixture.rb
+        test/support/status_read_only.Dockerfile test/support/status_read_only_fixture.rb test/support/non_btrfs_storage.rb
       ]
       digest = Digest::SHA256.new
       paths.each do |relative|

@@ -139,6 +139,7 @@ class RuntimeCommandTest < Minitest::Test
     with_tmp_global_config(runtime: false) do |home|
       output, errors, process = Open3.capture3(
         { "HIVE_HOME" => home }, RbConfig.ruby,
+        "-I", File.expand_path("../../../lib", __dir__), "-r", ENV.fetch("HIVE_TEST_STORAGE_BOOT"),
         File.expand_path("../../../bin/hive", __dir__), "runtime", "init", "--json"
       )
       assert_equal 0, process.exitstatus, errors

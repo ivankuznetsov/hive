@@ -276,6 +276,59 @@ class SetupOrchestratorTest < Minitest::Test
     assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
   end
 
+  def test_prepares_fresh_xdg_storage_before_bootstrap_and_preserves_shared_hive_home
+    install = Hive::RuntimeControlPlane::Installation.method(:setup)
+    [ :xdg, :shared_json, :shared_text ].each do |scenario|
+      with_xdg_home do |sandbox|
+        shared = scenario != :xdg
+        state = shared ? File.join(sandbox, "shared") : Hive::Paths.state_home
+        if shared
+          Dir.mkdir(state, 0o700)
+          File.write(File.join(state, "keep"), "shared content")
+        end
+        mutations = []
+        runner = lambda do |command, *args|
+          case command
+          when "stat" then "9123683e btrfs"
+          when "lsattr" then "----------------#{mutations.empty? ? '-' : 'C'}----- #{args.last}"
+          when "chattr"
+            assert_empty Dir.children(state)
+            mutations << args.last
+            ""
+          end
+        end
+        output = StringIO.new
+        json = scenario != :shared_text
+        with_env("HIVE_HOME" => shared ? state : nil) do
+          with_linux_storage(runner: runner) do
+            with_all_collaborators_ok(diagnostics: diag(ok_row)) do
+              with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :setup, install) do
+                setup = Hive::Commands::Setup.new(json: json, yes: true, no_init: true, output: output)
+                setup.define_singleton_method(:bootstrap_qmd_if_missing) do |_diagnostics|
+                  File.write(File.join(state, "bootstrap-marker"), "")
+                end
+                assert_equal 0, setup.call
+              end
+            end
+          end
+        end
+        assert_equal(shared ? [] : [ state ], mutations)
+        assert File.file?(Hive::Paths.runtime_control_plane_path(state))
+        if shared
+          assert_equal "shared content", File.read(File.join(state, "keep"))
+          assert_equal 1, output.string.scan("wiki/commands/runtime.md#btrfs-nocow-migration").size
+        end
+        if json
+          payload = JSON.parse(output.string)
+          phase = payload.fetch("phases").find { |row| row["name"] == "runtime_control_plane" }
+          assert phase["ok"]
+          assert_equal shared ? 1 : 0, Array(phase["storage_warnings"]).size
+          assert_empty payload.fetch("warnings")
+        end
+      end
+    end
+  end
+
   def test_setup_json_and_stderr_include_deduplicated_alias_guidance
     output = StringIO.new
     error = StringIO.new
@@ -325,7 +378,14 @@ class SetupOrchestratorTest < Minitest::Test
           with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
             ->(**_kw) { flunk "daemon must not be installed in --no-bootstrap" }) do
             stub_web_config do
-              Hive::Commands::Setup.new(json: true, no_bootstrap: true, output: output).call
+              with_xdg_home do
+                refuse = ->(**) { raise "diagnose-only attempted storage preparation" }
+                with_replaced_singleton_method(Hive::RuntimeControlPlane::StorageAttributes, :prepare, refuse) do
+                  result = Hive::Commands::Setup.new(json: true, no_bootstrap: true, output: output).call
+                  refute_path_exists Hive::Paths.state_home
+                  result
+                end
+              end
             end
           end
         end

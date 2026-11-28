@@ -16,6 +16,7 @@ require "hive/commands/new"
 require "hive/commands/status"
 require "hive/daemon/operational_snapshot"
 require "hive/runtime_control_plane/installation"
+require_relative "non_btrfs_storage"
 require "hive/runtime_control_plane/operational_repository"
 
 module StatusReadOnlyFixture

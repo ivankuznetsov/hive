@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "json_schemer"
+require "logger"
 require "hive/command_maintenance_authority"
 require "hive/command_mutations"
 require "hive/command_operation"
@@ -1697,7 +1698,7 @@ class CommandReceiptContractTest < Minitest::Test
   end
 
   def test_github_auth_rejects_non_numeric_identity
-    auth = Hive::Web::GithubAuth.new(config: {})
+    auth = Hive::Web::GithubAuth.new(config: {}, logger: Logger.new(IO::NULL))
     response = Net::HTTPOK.new("1.1", "200", "OK")
     response.instance_variable_set(:@read, true)
     response.instance_variable_set(:@body, JSON.generate("login" => "owner", "id" => "1"))

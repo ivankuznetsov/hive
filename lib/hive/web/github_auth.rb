@@ -1,5 +1,7 @@
 require "json"
 require "net/http"
+require "openssl"
+require "timeout"
 require "uri"
 
 module Hive
@@ -31,16 +33,53 @@ module Hive
       SLOW_DOWN_PENALTY = 5
 
       # Transport failures GitHub being slow/unreachable can produce. Mapped
-      # to Hive::Error so the operator sees the friendly 422 error page
-      # ("could not reach GitHub") instead of a blank 500 — the same policy
-      # the Telegram validator applies to its transport errors.
+      # to Hive::Error so the operator sees a stable 422 error page instead of
+      # an unhandled 500. Uses transport superclasses (SystemCallError covers
+      # every Errno::*, IOError covers EOFError) while individual subclasses
+      # stay in `transport_reason` for safe operator diagnostics.
       NETWORK_ERRORS = [
-        Net::OpenTimeout, Net::ReadTimeout, SocketError,
-        Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH, IOError
+        Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout, Timeout::Error,
+        SocketError, OpenSSL::SSL::SSLError, SystemCallError, IOError
       ].freeze
 
-      def initialize(config:, http: Net::HTTP)
+      TRANSPORT_ERROR_MESSAGE =
+        "Could not reach GitHub. Check this host's network, DNS, and TLS configuration, then try again.".freeze
+
+      TRANSPORT_WARNING_EVENT = "github_transport_error".freeze
+
+      def self.transport_reason(error, total_deadline: false)
+        return "total_deadline" if total_deadline
+
+        case error
+        when OpenSSL::SSL::SSLError then "tls_failure"
+        when SocketError then "dns_failure"
+        when Net::OpenTimeout then "open_timeout"
+        when Net::ReadTimeout then "read_timeout"
+        when Net::WriteTimeout then "write_timeout"
+        when Timeout::Error, Errno::ETIMEDOUT then "connection_timeout"
+        when Errno::ECONNREFUSED then "connection_refused"
+        when Errno::ECONNRESET then "connection_reset"
+        when Errno::ENETUNREACH then "network_unreachable"
+        when Errno::EHOSTUNREACH then "host_unreachable"
+        when EOFError then "premature_eof"
+        when SystemCallError then "system_call_failure"
+        else "io_failure"
+        end
+      end
+
+      def self.warn_transport(logger:, operation:, error:, total_deadline: false)
+        payload = {
+          "event" => TRANSPORT_WARNING_EVENT,
+          "operation" => operation,
+          "reason" => transport_reason(error, total_deadline: total_deadline),
+          "error_class" => error.class.name
+        }
+        logger.warn(JSON.generate(payload))
+      end
+
+      def initialize(config:, logger:, http: Net::HTTP)
         @config = config
+        @logger = logger
         @http = http
       end
 
@@ -63,7 +102,7 @@ module Hive
       # identifies the operator; the Rails web app passes "repo" so the
       # granted token can also list/clone the operator's repositories.
       def start_device_flow(scope: "read:user")
-        body = post_form(DEVICE_CODE_URL, "GitHub device authorization",
+        body = post_form(DEVICE_CODE_URL, "GitHub device authorization", "github_device_authorization",
                          client_id: client_id, scope: scope)
         raise Hive::Error, "GitHub device authorization failed: #{body["error_description"] || body["error"]}" if body["error"]
 
@@ -86,7 +125,7 @@ module Hive
       # app's repo listing) can keep it; callers that only gate on identity
       # may ignore it.
       def poll_device_flow(device_code)
-        body = post_form(TOKEN_URL, "GitHub device grant poll",
+        body = post_form(TOKEN_URL, "GitHub device grant poll", "github_device_grant_poll",
                          client_id: client_id, device_code: device_code, grant_type: GRANT_TYPE)
         case body["error"]
         when nil
@@ -129,11 +168,11 @@ module Hive
         { use_ssl: true, open_timeout: OPEN_TIMEOUT_SEC, read_timeout: READ_TIMEOUT_SEC }
       end
 
-      def post_form(url, context, **fields)
+      def post_form(url, context, operation, **fields)
         req = Net::HTTP::Post.new(url)
         req["Accept"] = "application/json"
         req.set_form_data(**fields)
-        res = request(req, url, context)
+        res = request(req, url, operation)
         raise Hive::Error, "#{context} failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
 
         JSON.parse(res.body)
@@ -145,7 +184,7 @@ module Hive
         req = Net::HTTP::Get.new(USER_URL)
         req["Accept"] = "application/vnd.github+json"
         req["Authorization"] = "Bearer #{token}"
-        res = request(req, USER_URL, "GitHub user lookup")
+        res = request(req, USER_URL, "github_user_lookup")
         raise Hive::Error, "GitHub user lookup failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
 
         payload = JSON.parse(res.body)
@@ -161,10 +200,11 @@ module Hive
         raise Hive::Error, "GitHub user lookup returned an unparseable response"
       end
 
-      def request(req, url, context)
+      def request(req, url, operation)
         @http.start(url.host, url.port, **http_timeouts) { |http| http.request(req) }
       rescue *NETWORK_ERRORS => e
-        raise Hive::Error, "#{context}: could not reach GitHub (#{e.class}: #{e.message})"
+        self.class.warn_transport(logger: @logger, operation: operation, error: e)
+        raise Hive::Error, TRANSPORT_ERROR_MESSAGE, cause: nil
       end
 
       def client_id

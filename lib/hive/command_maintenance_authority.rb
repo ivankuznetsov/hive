@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "logger"
 require "hive/paths"
 require "hive/errors"
 require "hive/config"
@@ -11,6 +12,9 @@ module Hive
   # by every command-receipt maintenance operation. CLI authority derives
   # from custody of the shared Hive state home, never from an operator label.
   class CommandMaintenanceAuthority
+    OWNER_CHECK_LOGGER = Logger.new(IO::NULL)
+    private_constant :OWNER_CHECK_LOGGER
+
     attr_reader :principal, :principal_source, :peer_address, :custody_uid
 
     def self.local(principal: nil)
@@ -51,12 +55,14 @@ module Hive
       unless id.is_a?(Integer) && id.positive?
         raise Hive::ConfigError, "keyed web execution requires an authenticated numeric GitHub identity"
       end
-      auth = Hive::Web::GithubAuth.new(config: config)
+      auth = Hive::Web::GithubAuth.new(config: config, logger: OWNER_CHECK_LOGGER)
       new(
         principal: "github:#{id}", principal_source: "signed_in_web",
         installation_owner: auth.maintenance_owner?(login, id),
         installation_owner_check: -> {
-          Hive::Web::GithubAuth.new(config: config_loader.call).maintenance_owner?(login, id)
+          Hive::Web::GithubAuth.new(
+            config: config_loader.call, logger: OWNER_CHECK_LOGGER
+          ).maintenance_owner?(login, id)
         },
         peer_address: peer_address, custody_uid: custody.uid
       )

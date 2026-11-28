@@ -406,4 +406,63 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_nil session[:github_token]
     assert_select ".session-login", text: "Local"
   end
+
+  test "device-flow transport failures render shared guidance and emit untagged JSON warning under tagged Rails logger" do
+    sentinel_tag = "req-id-sentinel-7f3a"
+    sentinel_host = "proxy.internal.invalid"
+    sentinel_message = "connect failed to https://#{sentinel_host}/login?token=gho_sentinelSecret99"
+    guidance = Hive::Web::GithubAuth::TRANSPORT_ERROR_MESSAGE
+
+    [
+      [ OpenSSL::SSL::SSLError.new(sentinel_message), "tls_failure" ],
+      [ Errno::ENETUNREACH.new(sentinel_message), "network_unreachable" ]
+    ].each do |injected, expected_reason|
+      raising_http = Object.new
+      raising_http.define_singleton_method(:start) { |*| raise injected }
+      SessionsController.http_client = raising_http
+
+      log_output = StringIO.new
+      tagged_logger = ActiveSupport::TaggedLogging.logger(log_output)
+      previous_logger = Rails.logger
+      Rails.logger = tagged_logger
+
+      begin
+        tagged_logger.tagged(sentinel_tag) do
+          Rails.logger.info("before device flow request")
+          post "/auth/github"
+          Rails.logger.info("after device flow request")
+        end
+      ensure
+        Rails.logger = previous_logger
+      end
+
+      assert_response :unprocessable_entity
+      assert_select "p", text: guidance
+      refute_includes response.body, injected.class.name
+      refute_includes response.body, sentinel_host
+      refute_includes response.body, "gho_sentinelSecret99"
+
+      event_lines = log_output.string.lines.select do |line|
+        line.include?(Hive::Web::GithubAuth::TRANSPORT_WARNING_EVENT)
+      end
+      assert_equal 1, event_lines.length, "expected one JSON warning line for #{injected.class}"
+      raw_line = event_lines.first
+      parsed = JSON.parse(raw_line)
+      assert_equal(
+        {
+          "event" => Hive::Web::GithubAuth::TRANSPORT_WARNING_EVENT,
+          "operation" => "github_device_authorization",
+          "reason" => expected_reason,
+          "error_class" => injected.class.name
+        },
+        parsed
+      )
+      refute_includes raw_line, sentinel_tag
+      refute_includes raw_line, sentinel_host
+      refute_includes raw_line, "gho_sentinelSecret99"
+
+      assert_includes log_output.string, "[#{sentinel_tag}] before device flow request"
+      assert_includes log_output.string, "[#{sentinel_tag}] after device flow request"
+    end
+  end
 end

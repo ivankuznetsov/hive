@@ -27,7 +27,7 @@ module Hive
                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                        :condition_migration, :condition_provenance, :shadow_audit,
                        :condition_warning, :pr_url,
-                       :plan_review, :task_history_invalid,
+                       :plan_review, :task_history_invalid, :reconciliation,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -228,7 +228,8 @@ module Hive
               unmet_dependencies: Array(task["unmet_dependencies"]),
               dependency_base_mode: task["dependency_base_mode"] || "default",
               blocked: admission_error ? true : task["blocked"] == true,
-              admission_error: admission_error
+              admission_error: admission_error,
+              reconciliation: task["reconciliation"]
             )
           end
         end

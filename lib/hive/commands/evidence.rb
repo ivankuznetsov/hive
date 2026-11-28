@@ -338,9 +338,16 @@ module Hive
       # without this a task that needed rework could never be reviewed again.
       # Keep the earlier passes for provenance under reviews/archive/.
       def archive_review_passes!(locked_task, sequence)
-        Hive::Stages::Review::PassArchive.retire!(
+        relative = Hive::Stages::Review::PassArchive.retire!(
           locked_task, label: format("rework-%02d", sequence.to_i), expiry_reason: "review_reset"
         )
+        if relative
+          require "hive/internal_pr_checkout"
+          Hive::InternalPrCheckout.sync_history_after_pass_archive!(
+            task: locked_task, label: File.basename(relative)
+          )
+        end
+        relative
       end
 
       def emit_rework(payload)

@@ -438,6 +438,92 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_validate_generation_verifies_internal_pr_checkout_under_lease
+    require "hive/internal_pr_checkout"
+
+    with_tmp_dir do |dir|
+      folder = File.join(dir, "repo", ".hive-state", "stages", "6-review", "adhoc-review-pr-9")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), {
+        "id" => 9, "slug" => "adhoc-review-pr-9", "source" => "ad-hoc", "workflow" => "coding"
+      }.to_yaml)
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 9
+        pr_url: https://github.com/acme/repo/pull/9
+        head_oid: #{"b" * 40}
+        ---
+        PR 9
+      MD
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "review\n")
+      task = Struct.new(
+        :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :folder, :workflow,
+        keyword_init: true
+      ).new(
+        id: 9, slug: "adhoc-review-pr-9", state_file: state_file,
+        stage_index: 6, stage_name: "review", project_root: File.join(dir, "repo"),
+        folder: folder, workflow: "coding"
+      )
+
+      calls = []
+      ok_result = Hive::InternalPrCheckout::Result.new(
+        status: "current", reason: "head_unchanged", task_slug: "adhoc-review-pr-9", task_id: "9",
+        pr_number: 9, pr_url: "https://github.com/acme/repo/pull/9",
+        generation: 2, head_oid: "b" * 40, checkout_digest: "d" * 64
+      )
+      current_gen = Struct.new(:ownership_generation, :task_input_epoch).new("gen-b", 0)
+      context = Hive::Attempts::Context.send(
+        :new, attempt_id: "attempt-pr-1", task_generation: 0,
+        ownership_generation: "gen-b", project: "demo", intended_stage: "6-review",
+        pr_observation: { "state" => "OPEN", "head_oid" => "b" * 40 }
+      )
+      assert_equal({ "state" => "OPEN", "head_oid" => "b" * 40 }, context.pr_observation)
+      assert context.pr_observation.frozen?
+
+      with_replaced_singleton_method(Hive::InternalPrCheckout, :reconcile, lambda { |**kwargs|
+        calls << kwargs
+        ok_result
+      }) do
+        with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { current_gen }) do
+          assert context.validate_generation!(task)
+        end
+      end
+      assert_equal [ { task: task, mode: :local_verify, lock_held: true } ], calls
+      assert_equal ok_result, context.last_reconciliation
+
+      # Blocked non-retryable local verification fails closed with ReconciliationBlocked.
+      blocked_result = Hive::InternalPrCheckout::Result.new(
+        status: "blocked", reason: "pending_invalid", retryable: false,
+        task_slug: "adhoc-review-pr-9", task_id: "9", guidance: "pending intent is malformed"
+      )
+      ctx_blocked = Hive::Attempts::Context.send(
+        :new, attempt_id: "attempt-pr-2", task_generation: 0,
+        ownership_generation: "gen-b", project: "demo", intended_stage: "6-review"
+      )
+      with_replaced_singleton_method(Hive::InternalPrCheckout, :reconcile, ->(**) { blocked_result }) do
+        err = assert_raises(Hive::Attempts::ReconciliationBlocked) { ctx_blocked.validate_generation!(task) }
+        assert_equal blocked_result, err.reconciliation
+      end
+
+      # Retryable local verification failure defers with ReconciliationBusy (TEMPFAIL).
+      busy_result = Hive::InternalPrCheckout::Result.new(
+        status: "blocked", reason: "remote_observation_required", retryable: true,
+        task_slug: "adhoc-review-pr-9", task_id: "9", guidance: "needs explicit reopen"
+      )
+      ctx_busy = Hive::Attempts::Context.send(
+        :new, attempt_id: "attempt-pr-3", task_generation: 0,
+        ownership_generation: "gen-b", project: "demo", intended_stage: "6-review"
+      )
+      with_replaced_singleton_method(Hive::InternalPrCheckout, :reconcile, ->(**) { busy_result }) do
+        err = assert_raises(Hive::Attempts::ReconciliationBusy) { ctx_busy.validate_generation!(task) }
+        assert_equal busy_result, err.reconciliation
+        assert_equal Hive::ExitCodes::TEMPFAIL, err.exit_code
+      end
+    end
+  end
+
   def test_workflow_task_binding_and_invalid_inherited_descriptor_are_checked
     task = FakeTask.new(id: 42, slug: "task", stage_index: 2, stage_name: "brainstorm")
     resolver = Struct.new(:task) { def resolve = task }.new(task)

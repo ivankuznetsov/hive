@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/internal_pr_checkout/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-11-22
+updated: 2026-11-28
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -1524,3 +1524,52 @@ to default-branch history claims that a squash history is unpushed. Preview adds
 no open-PR lookup, publication, readiness change or destructive Git operation.
 Merged-PR blockers retain all work and require an operator to decide whether to
 deliver it through a new change or establish that its content is already delivered.
+
+## Internal PR checkout state and snapshots
+
+An applicable `6-review` internal PR review task (`source: ad-hoc`) stores its
+controller-owned checkout generation state beside `pr.md` and `worktree.yml`:
+
+```text
+<task>/internal-pr-checkout/
+├── current.json        # logical atomic publication point (generation, reviewed_oid, head_transition_digest)
+├── pending.json        # transaction intent + rollback/roll-forward journal (fences all readers while present)
+├── candidate.json      # active controller-authored fix/validation commit proof for the current generation
+├── history-root.json   # chained archive root sealing reviews/archive/<label>/ manifests
+├── grant-index.json    # O(1) bucketed historical review-grant index
+└── manifests/          # immutable per-generation archive manifests and grant buckets
+```
+
+- **Canonical `pr.md` projection.** New and reconciled internal PR reviews write
+  canonical `head_oid` alongside `pr_number`, `pr_url`, `source: ad-hoc`,
+  `base_ref_name`, `head_ref_name`, `head_repository`, `is_cross_repository`,
+  and `pr_state`. Legacy `head_ref_oid` is accepted only during bounded legacy
+  implicit generation-1 validation and is promoted on the next transition.
+- **Logical publication and recovery boundary.** `pending.json` is written and
+  fsynced before any fetch or mutation and fences every reader until removed.
+  Interruption before durable final provider confirmation (`confirmed` phase)
+  rolls back cleanly to the prior generation; interruption at or after
+  confirmation rolls forward to the prepared generation exactly once and removes
+  `pending.json` after `current.json` publishes. Unverifiable or malformed
+  pending state fails closed (`pending_invalid`) with zero mutations.
+- **Coherent read-only snapshots.** `Hive::InternalPrCheckout.read_only_snapshot`
+  uses the verified state when the caller already holds the task lease, and for
+  read-only consumers (`TaskAction`, `Commands::Status`, `TaskClosure`,
+  `PrMergeWatcher`) brackets the entire projection read with identical committed
+  file fingerprints, absence of `pending.json`, and identical idle SQLite lease
+  version (retrying on drift or reporting `busy` so a torn A->B, A->B->A, or
+  rollback sample is never acted on).
+- **`hive-status.v9` parity.** Owned live replays report `action: "agent_running"`.
+  Idle valid pending (`blocked/transition_interrupted`) and idle malformed
+  pending (`blocked/pending_invalid`) surface the existing non-runnable
+  `action: "error"` with bounded diagnostic guidance, `admission_error: null`,
+  and the closed optional `reconciliation` object (`$defs.InternalPrReconciliation`).
+  `DependencyAdmission::REASON_CODES` and its four schema mirrors stay unchanged,
+  and `StatusConsumer` preserves `action`, `diagnostic`, `reconciliation`, and
+  `admission_error: null` without substituting dependency remediation.
+- **Generation-bound closure and merge watcher.** `TaskClosure` validates the
+  proven `hive/review/pr-N` branch and fails closed on pending snapshots.
+  `PrMergeWatcher` holds pending/incoherent internal PR tasks without polling
+  GitHub, binds candidates to `(generation, reviewed_oid, head_transition_digest)`,
+  rejects mid-transition generation drift before recording or archiving, and
+  records generation-scoped `pr_observed` / `merge_observed` journal activity.

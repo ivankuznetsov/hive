@@ -236,4 +236,224 @@ class AttemptsGenerationTest < Minitest::Test
       end
     end
   end
+
+  def test_internal_pr_generation_preserves_legacy_identity_and_changes_across_all_producers
+    require "hive/internal_pr_checkout"
+    require "hive/daemon/recovery_coordinator"
+    require "hive/daemon/dispatcher"
+    require "hive/workflow_admission"
+
+    with_tmp_dir do |dir|
+      project_root = File.join(dir, "repo")
+      folder = File.join(project_root, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), {
+        "id" => 42, "slug" => "adhoc-review-pr-42", "source" => "ad-hoc", "workflow" => "coding"
+      }.to_yaml)
+      oid_a = "a" * 40
+      oid_b = "b" * 40
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_ref_oid: #{oid_a}
+        ---
+        PR body
+      MD
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "Review task\n<!-- REVIEW_ERROR reason=agent_failed -->\n")
+
+      task = Struct.new(
+        :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :folder, :workflow,
+        keyword_init: true
+      ).new(
+        id: 42, slug: "adhoc-review-pr-42", state_file: state_file,
+        stage_index: 6, stage_name: "review", project_root: project_root,
+        folder: folder, workflow: "coding"
+      )
+
+      # Pre-deploy baseline (non-ad-hoc identical bytes) must equal legacy implicit gen 1.
+      baseline_digest = Digest::SHA256.new
+      baseline_digest << "hive-progress-v2\0"
+      baseline_digest << state_file
+      baseline_digest << File.binread(state_file)
+      baseline_digest << "\0dependency-admission\0"
+      baseline_digest << Hive::DependencySnapshot.admission_fingerprint(task)
+      expected_legacy_token = baseline_digest.hexdigest
+
+      legacy_gen = Hive::Attempts::Generation.resolve(
+        task: task, project: "demo", intended_stage: "6-review"
+      )
+      assert_equal expected_legacy_token, legacy_gen.progress_token
+
+      # Explicit gen 1 (head_transition_digest: nil) keeps the exact same legacy token.
+      Hive::InternalPrCheckout.initialize_new_task!(
+        task_folder: folder, task_id: "42", task_slug: "adhoc-review-pr-42", project: "demo",
+        pr_host: "github.com", pr_repository: "acme/repo", pr_number: 42,
+        pr_url: "https://github.com/acme/repo/pull/42", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/repo", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-42", head_oid: oid_a
+      )
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{oid_a}
+        ---
+        PR body
+      MD
+      gen1 = Hive::Attempts::Generation.resolve(
+        task: task, project: "demo", intended_stage: "6-review"
+      )
+      assert_equal legacy_gen.task_generation, gen1.task_generation
+
+      # Committed head transition to B changes every eligible producer identically.
+      store = Hive::InternalPrCheckout::Store.new(folder)
+      current = store.read_current
+      tx_b = "tx-transition-b"
+      ret_label = Hive::InternalPrCheckout::Identity.retirement_label_for(
+        transaction_id: tx_b, target_oid: oid_b
+      )
+      digest_b = Hive::InternalPrCheckout::Store.head_transition_digest(
+        pr_url: current.fetch("pr_url"),
+        pr_number: current.fetch("pr_number"),
+        branch: current.fetch("branch"),
+        reviewed_oid: oid_b,
+        generation: 2,
+        previous_generation: 1,
+        retirement_label: ret_label,
+        transaction_id: tx_b
+      )
+      store.write_current!(current.merge(
+        "generation" => 2,
+        "previous_generation" => 1,
+        "retirement_label" => ret_label,
+        "transaction_id" => tx_b,
+        "reviewed_oid" => oid_b,
+        "candidate_oid" => oid_b,
+        "head_transition_digest" => digest_b
+      ))
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{oid_b}
+        ---
+        PR body
+      MD
+
+      gen2 = Hive::Attempts::Generation.resolve(
+        task: task, project: "demo", intended_stage: "6-review"
+      )
+      refute_equal gen1.task_generation, gen2.task_generation
+      refute_equal gen1.progress_token, gen2.progress_token
+
+      # Table-test every eligible producer against the exact same generation binding.
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: File.join(dir, "state"))
+      rec_pre = coordinator.send(
+        :resolve_generation, task,
+        project: "demo", intended_stage: "6-review",
+        state_file_content: File.binread(state_file)
+      )
+      assert_equal gen2.task_generation, rec_pre.task_generation
+
+      stripped_bytes = Hive::Markers.without_named_markers(
+        File.binread(state_file), Hive::Markers::REVIEW_MARKER_NAMES
+      )
+      rec_post = coordinator.send(
+        :resolve_generation, task,
+        project: "demo", intended_stage: "6-review",
+        state_file_content: stripped_bytes
+      )
+      direct_post_token = Hive::Attempts::Generation.artifact_token(
+        task, state_file_content: stripped_bytes
+      )
+      assert_equal direct_post_token, rec_post.progress_token
+      refute_equal gen2.task_generation, rec_post.task_generation
+
+      wf_gen = Hive::WorkflowAdmission.generation_for(task, project: "demo")
+      assert_equal gen2.ownership_generation, wf_gen
+
+      # Stale supplied task_generation override fails closed with StaleTaskSource.
+      assert_raises(Hive::Attempts::StaleTaskSource) do
+        Hive::Attempts::Generation.resolve(
+          task: task, project: "demo", intended_stage: "6-review",
+          task_generation: gen1.task_generation
+        )
+      end
+
+      # Non-review stages (e.g., 2-brainstorm / Commands::Answer, 7-artifacts) are unaffected.
+      brainstorm_task = Struct.new(
+        :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :folder, :workflow,
+        keyword_init: true
+      ).new(
+        id: 42, slug: "adhoc-review-pr-42", state_file: state_file,
+        stage_index: 2, stage_name: "brainstorm", project_root: project_root,
+        folder: folder, workflow: "coding"
+      )
+      brainstorm_expected = Digest::SHA256.new
+      brainstorm_expected << "hive-progress-v2\0"
+      brainstorm_expected << state_file
+      brainstorm_expected << File.binread(state_file)
+      brainstorm_expected << "\0dependency-admission\0"
+      brainstorm_expected << Hive::DependencySnapshot.admission_fingerprint(brainstorm_task)
+      assert_equal brainstorm_expected.hexdigest, Hive::Attempts::Generation.artifact_token(brainstorm_task)
+
+      # Pending transaction raises InternalPrCheckout::Error instead of hashing a fallback,
+      # and Daemon::Dispatcher#bound_task_request_current? defers pending reads to the fence.
+      store.write_pending!({
+        "schema" => Hive::InternalPrCheckout::Store::PENDING_SCHEMA,
+        "schema_version" => 1,
+        "transaction_id" => "tx-pending-1",
+        "phase" => "prepared",
+        "task_id" => "42",
+        "task_slug" => "adhoc-review-pr-42",
+        "project" => "demo",
+        "pr_host" => "github.com",
+        "pr_repository" => "acme/repo",
+        "pr_number" => 42,
+        "pr_url" => "https://github.com/acme/repo/pull/42",
+        "branch" => "hive/review/pr-42",
+        "worktree_path" => File.join(dir, "wt"),
+        "remote_fingerprint" => Digest::SHA256.hexdigest("github.com/acme/repo"),
+        "old_generation" => 2,
+        "after_generation" => 3,
+        "old_reviewed_oid" => oid_b,
+        "old_candidate_oid" => oid_b,
+        "target_oid" => "c" * 40,
+        "quarantine_ref" => Hive::InternalPrCheckout::Identity.quarantine_ref_for("tx-pending-1"),
+        "candidate_archive_ref" => Hive::InternalPrCheckout::Identity.candidate_archive_ref_for(
+          pr_number: 42, generation: 2, transaction_id: "tx-pending-1"
+        ),
+        "retirement_label" => Hive::InternalPrCheckout::Identity.retirement_label_for(
+          transaction_id: "tx-pending-1", target_oid: "c" * 40
+        ),
+        "owned_temp_paths" => [],
+        "created_at" => "2026-11-28T00:00:00.000000Z",
+        "updated_at" => "2026-11-28T00:00:00.000000Z"
+      })
+      err = assert_raises(Hive::InternalPrCheckout::Error) do
+        Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "6-review")
+      end
+      assert_equal "transition_interrupted", err.reason
+
+      daemon_dispatcher = Hive::Daemon::Dispatcher.allocate
+      req = Struct.new(
+        :slug, :project, :task_id, :expected_stage, :argv, :task_generation,
+        keyword_init: true
+      ).new(
+        slug: "adhoc-review-pr-42", project: "demo", task_id: "42",
+        expected_stage: "6-review", argv: [ "hive", "review", "adhoc-review-pr-42" ],
+        task_generation: gen2.task_generation
+      )
+      resolver_stub = Struct.new(:task) { def resolve = task }.new(task)
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_a, **_kw) { resolver_stub }) do
+        assert daemon_dispatcher.send(:bound_task_request_current?, req),
+               "daemon early request matching must defer pending internal PR reads to the admission fence"
+      end
+    end
+  end
 end

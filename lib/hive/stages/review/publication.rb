@@ -36,6 +36,22 @@ module Hive
         end
 
         def publish!(expected_head:, withheld: nil)
+          # U6.5: Internal PR reviews never push or write github-publication.json,
+          # even when review.adhoc.fix is enabled.
+          require "hive/internal_pr_checkout"
+          if Hive::InternalPrCheckout.applicable?(@task)
+            @evidence = {
+              "worktree" => @ctx.worktree_path,
+              "publication" => "not_applicable",
+              "verification" => "not_applicable",
+              "pr_url" => @pr_url,
+              "local_head" => expected_head,
+              "failure_reason" => nil,
+              "observed_at" => Time.now.utc.iso8601
+            }
+            return self
+          end
+
           if @evidence["local_head"] != expected_head
             @evidence = { "worktree" => @ctx.worktree_path, "publication" => "unknown",
                           "verification" => "pending", "pr_url" => @pr_url }

@@ -2133,4 +2133,83 @@ class TaskClosureTest < Minitest::Test
       database&.disconnect
     end
   end
+
+  public
+
+  def test_internal_pr_closure_uses_proven_review_branch_and_fails_closed_on_pending_snapshot
+    require "hive/internal_pr_checkout"
+    oid_a = "a" * 40
+    oid_b = "b" * 40
+    with_closure_project(stage: "6-review", state_file: "task.md") do |base_task, _project|
+      hive_state = File.join(base_task.project_root, ".hive-state")
+      slug = Hive::InternalPrCheckout::Identity.slug_for(42)
+      folder = File.join(hive_state, "stages", "6-review", slug)
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      Hive::TaskMeta.write(folder, id: 42, slug: slug, display_name: "PR 42")
+      File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n\n# PR 42\n")
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/app/pull/42
+        head_oid: #{oid_a}
+        base_ref_name: main
+        head_ref_name: feat
+        head_repository: acme/app
+        is_cross_repository: false
+        pr_state: OPEN
+        ---
+      MD
+      store = Hive::InternalPrCheckout::Store.new(folder)
+      store.initialize_generation_one!(
+        task_id: "0042", task_slug: slug, project: "app",
+        pr_host: "github.com", pr_repository: "acme/app", pr_number: 42,
+        pr_url: "https://github.com/acme/app/pull/42", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-42", head_oid: oid_a,
+        committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+      )
+      task = Hive::Task.new(folder)
+      id = Hive::InternalPrCheckout::Identity.resolve!(task)
+
+      # Coherent snapshot returns authoritative reviewed_oid and validates hive/review/pr-42.
+      pr_fm = Hive::Gh.pr_frontmatter(File.join(folder, "pr.md"))
+      assert_equal oid_a, Hive::TaskClosure.local_pr_head_binding(task, frontmatter: pr_fm)
+
+      File.write(File.join(folder, "worktree.yml"), { "path" => id.expected_worktree_path, "branch" => "hive/review/pr-42" }.to_yaml)
+      observed_kwargs = nil
+      with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer,
+        ->(_folder, **kwargs) do
+          observed_kwargs = kwargs
+          { "path" => id.expected_worktree_path, "branch" => "hive/review/pr-42" }
+        end
+      ) do
+        blockers = Hive::TaskClosure.new.send(:worktree_blockers, task)
+        assert_equal "hive/review/pr-42", observed_kwargs[:expected_branch]
+        assert_equal id.expected_worktree_path, observed_kwargs[:expected_path]
+        assert_equal [ "worktree_missing" ], blockers.map { |b| b.fetch("code") }
+      end
+
+      # Pending transaction fails closed for both local_pr_head_binding and worktree_blockers.
+      store.write_pending!(
+        "schema" => Hive::InternalPrCheckout::Store::PENDING_SCHEMA,
+        "schema_version" => 1,
+        "transaction_id" => "tx-closure-42", "phase" => "prepared", "final_confirmed" => false,
+        "task_id" => "0042", "task_slug" => slug, "project" => "app",
+        "pr_host" => "github.com", "pr_repository" => "acme/app", "pr_number" => 42,
+        "pr_url" => "https://github.com/acme/app/pull/42", "branch" => "hive/review/pr-42",
+        "worktree_path" => id.expected_worktree_path,
+        "old_generation" => 1, "after_generation" => 2,
+        "old_reviewed_oid" => oid_a, "old_candidate_oid" => oid_a, "target_oid" => oid_b,
+        "quarantine_ref" => Hive::InternalPrCheckout::Identity.quarantine_ref_for("tx-closure-42"),
+        "candidate_archive_ref" => nil,
+        "retirement_label" => Hive::InternalPrCheckout::Identity.retirement_label_for(transaction_id: "tx-closure-42", target_oid: oid_b),
+        "remote_fingerprint" => "f" * 64, "created_at" => "2026-08-29T12:01:00Z"
+      )
+      assert_nil Hive::TaskClosure.local_pr_head_binding(task, frontmatter: pr_fm)
+      blockers = Hive::TaskClosure.new.send(:worktree_blockers, task)
+      assert_equal [ "worktree_unverified" ], blockers.map { |b| b.fetch("code") }
+    end
+  end
 end

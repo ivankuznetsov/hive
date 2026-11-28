@@ -1093,6 +1093,7 @@ module Hive
           "diagnostic" => row[:diagnostic]
         }
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        payload["reconciliation"] = row[:reconciliation] if row[:reconciliation]
         payload.delete("implementation_identity") unless row[:implementation_identity]
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(
@@ -1716,14 +1717,44 @@ module Hive
                 )
                 next
               end
-              marker = if task.workflow.controller?
-                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+              lock_holder = task_lock_holder(task)
+              live_holder = live_task_lock_holder(lock_holder)
+              internal_pr_rec = nil
+              internal_pr_busy = false
+              internal_pr_snap = nil
+              pr_url_value = nil
+              if !live_holder && internal_pr_review_task?(task)
+                require "hive/internal_pr_checkout"
+                snap = Hive::InternalPrCheckout.read_only_snapshot(task) do |_s|
+                  m = task.workflow.controller? ? Hive::Markers::State.new(name: :none, attrs: {}, raw: nil) : Hive::Markers.current(task.state_file)
+                  m, proj, invalid_hist = status_projection(task, m, project: project_name || project_name_for(task))
+                  [ m, proj, invalid_hist, pr_url_for(task) ]
+                end
+                internal_pr_snap = snap
+                if snap.coherent? && snap.sampled_value
+                  marker, projection, task_history_invalid, pr_url_value = snap.sampled_value
+                elsif snap.busy?
+                  internal_pr_busy = true
+                  marker = task.workflow.controller? ? Hive::Markers::State.new(name: :none, attrs: {}, raw: nil) : Hive::Markers.current(task.state_file)
+                  marker, projection, task_history_invalid = status_projection(task, marker, project: project_name || project_name_for(task))
+                  pr_url_value = pr_url_for(task)
+                else
+                  internal_pr_rec = snap.to_reconciliation_result(task: task).to_h
+                  marker = task.workflow.controller? ? Hive::Markers::State.new(name: :none, attrs: {}, raw: nil) : Hive::Markers.current(task.state_file)
+                  marker, projection, task_history_invalid = status_projection(task, marker, project: project_name || project_name_for(task))
+                  pr_url_value = pr_url_for(task)
+                end
               else
-                Hive::Markers.current(task.state_file)
+                marker = if task.workflow.controller?
+                  Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+                else
+                  Hive::Markers.current(task.state_file)
+                end
+                marker, projection, task_history_invalid = status_projection(
+                  task, marker, project: project_name || project_name_for(task)
+                )
+                pr_url_value = pr_url_for(task)
               end
-              marker, projection, task_history_invalid = status_projection(
-                task, marker, project: project_name || project_name_for(task)
-              )
               folder_mtime = File.mtime(entry)
               mtime = if task.workflow.controller?
                 folder_mtime
@@ -1740,9 +1771,8 @@ module Hive
               # perturb the filesystem observation used by this action.
               observation_source = Hive::OperationalAction.observation_mtime_source(task)
               observation_mtime = observation_source == entry ? folder_mtime : File.mtime(observation_source)
-              lock_holder = task_lock_holder(task)
-              live_holder = live_task_lock_holder(lock_holder)
-              icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: !live_holder.nil?)
+              effective_live_lock = !live_holder.nil? || internal_pr_busy
+              icon, state_label = decorate(task, marker, lock_holder: lock_holder, live_task_lock: effective_live_lock)
               claude_pid = claude_pid_from_lock(lock_holder)
               # Resolve once per row so JSON consumers (bot / daemon / agents)
               # get the absolute worktree path without re-implementing the
@@ -1766,13 +1796,15 @@ module Hive
                 folder: entry,
                 state_file: task.state_file,
                 worktree_path: worktree_path,
-                pr_url: pr_url_for(task),
+                pr_url: pr_url_value,
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
                 task_history_invalid: task_history_invalid == true,
                 projection: projection,
                 projection_data: projection.to_h,
+                reconciliation: internal_pr_rec,
+                internal_pr_snapshot: internal_pr_snap,
                 icon: icon,
                 state_label: state_label,
                 mtime: mtime,
@@ -1781,7 +1813,7 @@ module Hive
                 age: humanise_age(mtime, now: now),
                 claude_pid: claude_pid,
                 claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
-                live_task_lock: !live_holder.nil?,
+                live_task_lock: effective_live_lock,
                 attempt_id: lock_holder && lock_holder["attempt_id"],
                 task_generation: lock_holder && lock_holder["task_generation"],
                 task_lock_pid: live_holder && live_holder["pid"],
@@ -2379,8 +2411,12 @@ module Hive
             pid_alive: row[:claude_pid_alive],
             state_file_mtime: row[:mtime],
             agent_marker_grace_sec: grace_sec,
-            live_task_lock: row[:live_task_lock]
+            live_task_lock: row[:live_task_lock],
+            internal_pr_snapshot: row[:internal_pr_snapshot]
           )
+          reconciliation = if !row[:live_task_lock]
+            row[:reconciliation] || action.internal_pr_reconciliation&.to_h
+          end
           annotation = row.merge(
             action_key: action.key,
             action_label: action.label,
@@ -2388,6 +2424,7 @@ module Hive
             outcomes: action.allowed_outcomes,
             next_action: action.next_action,
             diagnostic: with_diagnostic ? (attempt_diagnostic_for(row) || action.diagnostic) : nil,
+            reconciliation: reconciliation,
             condition_gate: action.condition_gate&.to_h,
             condition_migration: action.migration_selection.to_h,
             condition_warning: action.condition_warning,
@@ -2397,6 +2434,22 @@ module Hive
           )
           task_history_invalid_annotation(annotation) || annotation
         end
+      end
+
+      def internal_pr_review_task?(task)
+        return false unless task && %w[review 6-review].include?(task.stage_name.to_s)
+
+        require "hive/internal_pr_checkout"
+        return false unless Hive::InternalPrCheckout.applicable?(task)
+
+        folder = task.folder.to_s
+        [
+          File.join(folder, "pr.md"),
+          File.join(folder, "worktree.yml"),
+          Hive::InternalPrCheckout::Identity.store_dir(folder)
+        ].any? { |candidate| File.exist?(candidate) || File.symlink?(candidate) }
+      rescue StandardError
+        false
       end
 
       def task_history_invalid_annotation(row)

@@ -167,6 +167,53 @@ module Hive
            !File.read(pr_path).start_with?("---")
           return nil
         end
+        require "hive/internal_pr_checkout"
+        if Hive::InternalPrCheckout.applicable?(task, allow_any_stage: true)
+          snap = Hive::InternalPrCheckout.read_only_snapshot(task, allow_any_stage: true) do |_s|
+            Hive::Markers.current(task.state_file)
+          end
+          unless snap.coherent?
+            return {
+              "key" => [ row.project.to_s, row.slug.to_s, "internal-pr-unready", snap.reason ],
+              "task" => { "project" => row.project.to_s, "slug" => row.slug.to_s },
+              "observation" => { "held" => true, "reason" => snap.reason },
+              "pull_request" => {}
+            }
+          end
+          marker = snap.sampled_value
+          task_generation = Hive::TaskClosure.task_generation(
+            task, marker: marker,
+            condition_task_generation: row.condition_task_generation,
+            commit_generation: row.commit_generation
+          )
+          pull_request = parse_pr_url(snap.identity.pr_url)
+          raise Hive::Error, "task pull request URL is not a canonical GitHub pull request" unless pull_request
+
+          observed_head = snap.reviewed_oid
+          repository_mismatch =
+            pull_request.fetch("host") != identity.fetch("host") ||
+            pull_request.fetch("repository") != identity.fetch("repository")
+          pull_request = pull_request.merge(
+            "observed_head" => observed_head,
+            "generation" => snap.generation,
+            "head_transition_digest" => snap.head_transition_digest
+          )
+          key = [
+            row.project.to_s, row.slug.to_s, task_generation,
+            Hive::TaskClosure.marker_generation(marker), pull_request
+          ]
+          return {
+            "key" => key,
+            "task" => { "project" => row.project.to_s, "slug" => row.slug.to_s },
+            "observation" => {
+              "marker_generation" => Hive::TaskClosure.marker_generation(marker),
+              "task_generation" => task_generation,
+              "held" => held_row?(row) || repository_mismatch
+            },
+            "pull_request" => pull_request
+          }
+        end
+
         marker = Hive::Markers.current(task.state_file)
         task_generation = Hive::TaskClosure.task_generation(
           task, marker: marker,
@@ -206,8 +253,19 @@ module Hive
           return { status: :blocked, reason: generation[:reason] || "task generation changed before reconciliation" }
         end
         frontmatter = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))
-        unless parse_pr_url(frontmatter["pr_url"].to_s) == candidate.fetch("pull_request").except("observed_head")
+        expected_pr = candidate.fetch("pull_request").except("observed_head", "generation", "head_transition_digest")
+        unless parse_pr_url(frontmatter["pr_url"].to_s) == expected_pr
           raise Hive::ConcurrentRunError, "task pull request binding changed before reconciliation"
+        end
+        if candidate.dig("pull_request", "generation")
+          require "hive/internal_pr_checkout"
+          live_snap = Hive::InternalPrCheckout.read_only_snapshot(task, allow_any_stage: true)
+          unless live_snap.coherent? &&
+                 live_snap.generation == candidate.dig("pull_request", "generation") &&
+                 live_snap.reviewed_oid == candidate.dig("pull_request", "observed_head") &&
+                 live_snap.head_transition_digest == candidate.dig("pull_request", "head_transition_digest")
+            raise Hive::ConcurrentRunError, "internal PR checkout generation changed before reconciliation"
+          end
         end
         result = remote_result(poll_facts(identity, candidate), candidate, now: now)
         record_remote_activity(task, candidate, result, now: now)
@@ -263,21 +321,30 @@ module Hive
         number = candidate.dig("pull_request", "number")
         state = remote.fetch("state")
         kind = state == "merged" ? "merge_observed" : "pr_observed"
+        gen = candidate.dig("pull_request", "generation")
+        observed_head = candidate.dig("pull_request", "observed_head")
+        op_id = if gen
+          "github:pr:#{number}:gen-#{gen}:#{observed_head}:#{state}:#{remote['merge_oid'] || 'none'}"
+        else
+          "github:pr:#{number}:#{state}:#{remote['merge_oid'] || 'none'}"
+        end
+        payload = {
+          "pr_number" => number,
+          "pr_url" => candidate.dig("pull_request", "url"),
+          "pr_state" => state,
+          "head_oid" => observed_head,
+          "merge_oid" => remote["merge_oid"],
+          "merged_at" => remote["merged_at"],
+          "draft" => false
+        }
+        payload["generation"] = gen if gen
         activity.record(
           kind: kind,
-          operation_id: "github:pr:#{number}:#{state}:#{remote['merge_oid'] || 'none'}",
+          operation_id: op_id,
           correlation_id: "publication:#{number}",
           reason: "pull request outcome changed", source: "github",
           occurred_at: remote["merged_at"] || now, observed_at: now,
-          payload: {
-            "pr_number" => number,
-            "pr_url" => candidate.dig("pull_request", "url"),
-            "pr_state" => state,
-            "head_oid" => candidate.dig("pull_request", "observed_head"),
-            "merge_oid" => remote["merge_oid"],
-            "merged_at" => remote["merged_at"],
-            "draft" => false
-          }
+          payload: payload
         )
         true
       rescue Hive::TaskActivity::Error, SystemCallError, IOError
@@ -368,6 +435,41 @@ module Hive
       end
 
       def generation_status(task, candidate)
+        require "hive/internal_pr_checkout"
+        if Hive::InternalPrCheckout.applicable?(task, allow_any_stage: true)
+          snap = Hive::InternalPrCheckout.read_only_snapshot(task, allow_any_stage: true) do |_s|
+            m = Hive::Markers.current(task.state_file)
+            b = Hive::TaskProjection::Reader.new(
+              task_folder: task.folder, task: task
+            ).read_routine(marker: m)
+            [ m, b ]
+          end
+          unless snap.coherent?
+            return {
+              status: :unavailable,
+              reason: "internal PR checkout snapshot unavailable (#{snap.reason})"
+            }
+          end
+          marker, bounded = snap.sampled_value
+          unless bounded.current?
+            reason = bounded.diagnostics.first&.fetch("reason", nil) || bounded.state
+            return {
+              status: :unavailable,
+              reason: "task journal is invalid (#{reason})"
+            }
+          end
+
+          current = Hive::TaskClosure.task_generation(
+            task, marker: marker, projection: bounded.projection
+          ) == candidate.dig("observation", "task_generation") &&
+            Hive::TaskClosure.marker_generation(marker) ==
+              candidate.dig("observation", "marker_generation") &&
+            snap.generation == candidate.dig("pull_request", "generation") &&
+            snap.reviewed_oid == candidate.dig("pull_request", "observed_head") &&
+            snap.head_transition_digest == candidate.dig("pull_request", "head_transition_digest")
+          return { status: current ? :current : :changed }
+        end
+
         marker = Hive::Markers.current(task.state_file)
         bounded = Hive::TaskProjection::Reader.new(
           task_folder: task.folder, task: task

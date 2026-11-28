@@ -4760,4 +4760,138 @@ class RunReviewTest < Minitest::Test
       end
     end
   end
+
+  def test_internal_pr_repush_ends_old_review_complete_and_runs_fresh_review_pass_without_publishing
+    require "hive/internal_pr_checkout"
+    require "hive/stages/review/github_publisher"
+    require "hive/stages/review/publication"
+
+    with_tmp_global_config do |home|
+      Hive::RuntimeControlPlane.disconnect
+      Hive::Lock.task_lease_repository = nil
+      with_tmp_dir do |root|
+        remote = File.join(root, "remote.git")
+        repo = File.join(root, "repo")
+        wt_root = File.join(root, "wt")
+        FileUtils.mkdir_p(wt_root)
+
+        run!("git", "-C", root, "init", "--bare", "--quiet", remote)
+        run!("git", "-C", root, "clone", "--quiet", remote, repo)
+        run!("git", "-C", repo, "config", "user.name", "Test")
+        run!("git", "-C", repo, "config", "user.email", "test@example.com")
+        run!("git", "-C", repo, "config", "commit.gpgsign", "false")
+        File.write(File.join(repo, "app.rb"), "puts 'main'\n")
+        run!("git", "-C", repo, "add", ".")
+        run!("git", "-C", repo, "commit", "--quiet", "-m", "main")
+        run!("git", "-C", repo, "branch", "-M", "main")
+        run!("git", "-C", repo, "push", "--quiet", "-u", "origin", "main")
+
+        run!("git", "-C", repo, "checkout", "--quiet", "-b", "pr-a")
+        File.write(File.join(repo, "app.rb"), "puts 'head-A'\n")
+        run!("git", "-C", repo, "add", ".")
+        run!("git", "-C", repo, "commit", "--quiet", "-m", "PR A")
+        oid_a = `git -C #{repo.shellescape} rev-parse HEAD`.strip
+        run!("git", "-C", repo, "push", "--quiet", "origin", "#{oid_a}:refs/pull/88/head")
+
+        run!("git", "-C", repo, "checkout", "--quiet", "-b", "pr-b")
+        File.write(File.join(repo, "app.rb"), "puts 'head-B'\n")
+        run!("git", "-C", repo, "add", ".")
+        run!("git", "-C", repo, "commit", "--quiet", "-m", "PR B")
+        oid_b = `git -C #{repo.shellescape} rev-parse HEAD`.strip
+        run!("git", "-C", repo, "checkout", "--quiet", "main")
+        run!("git", "-C", repo, "branch", "-D", "pr-a", "pr-b")
+
+        hive_state = File.join(repo, ".hive-state")
+        FileUtils.mkdir_p(File.join(hive_state, "stages", "6-review"))
+        File.write(File.join(hive_state, "config.yml"), {
+          "worktree_root" => wt_root,
+          "default_branch" => "main",
+          "rebase" => { "enabled" => false },
+          "review" => {
+            "adhoc" => { "fix" => true },
+            "github_publish" => { "enabled" => true },
+            "github_checks" => { "enabled" => false },
+            "ci" => { "command" => nil },
+            "reviewers" => [ {
+              "name" => "stub", "agent" => "claude", "output_basename" => "stub",
+              "skill" => "ce:code-review", "prompt_template" => "reviewer_claude_ce_code_review.md.erb"
+            } ],
+            "browser_test" => { "enabled" => false }
+          }
+        }.to_yaml)
+        Hive::Config.register_project(name: "demo", path: repo)
+        database = prepare_runtime_project(
+          state_home: home, name: "demo", path: repo, state_root_path: hive_state
+        )
+
+        # Create initial gen 1 checkout via AdhocReview.
+        meta_a = Hive::Gh::PrMetadata.new(
+          number: 88, url: "https://github.com/acme/demo/pull/88",
+          base_ref_name: "main", head_ref_name: "feature/x",
+          head_ref_oid: oid_a, head_repository: "acme/demo",
+          is_cross_repository: false, state: "OPEN", is_draft: false,
+          host: "github.com", repository: "acme/demo"
+        )
+        gh_stub = Object.new
+        gh_stub.define_singleton_method(:validated_pr_metadata) { |*, **| meta_a }
+        require "hive/commands/adhoc_review"
+        res = Hive::Commands::AdhocReview.new(
+          pr: "88", project: "demo", gh: gh_stub, allow_local_transport: true
+        ).enqueue
+        folder = File.join(hive_state, "stages", "6-review", res.fetch(:slug))
+        wt = File.join(wt_root, res.fetch(:slug))
+
+        # Mark gen 1 REVIEW_COMPLETE with old reviewer artifacts.
+        File.write(File.join(folder, "reviews", "stub-01.md"), "## High\n- [ ] old finding on A\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_complete, pass: 1)
+
+        # Repush to B on bare remote and run Commands::Run directly!
+        run!("git", "-C", repo, "push", "--quiet", "-f", "origin", "#{oid_b}:refs/pull/88/head")
+        meta_b = meta_a.with(head_ref_oid: oid_b)
+        orig_load = Hive::Config.method(:load)
+        reviewer_passes = []
+        with_replaced_singleton_method(Hive::Config, :load, lambda { |*args, **kwargs|
+          orig_load.call(*args, **kwargs).merge("agent_git_gate" => { "allow_local_transport" => true })
+        }) do
+          with_replaced_singleton_method(Hive::Gh, :validated_pr_metadata, ->(*, **) { meta_b }) do
+            with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { flunk "internal review must never post PR comments" }) do
+              with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, lambda { |_cfg, ctx, _task, **|
+                reviewer_passes << [ ctx.pass, `git -C #{ctx.worktree_path.shellescape} rev-parse HEAD`.strip ]
+                File.write(File.join(ctx.task_folder, "reviews", "stub-#{format('%02d', ctx.pass)}.md"), "# Clean\n")
+                :ok
+              }) do
+                with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+                  esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+                  File.write(esc, "# Escalations\n")
+                  Hive::Stages::Review::Triage::Result.new(
+                    status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
+                  )
+                }) do
+                  out, err, status = with_captured_exit do
+                    Hive::Commands::Run.new(folder, json: true).call
+                  end
+                  assert_equal Hive::ExitCodes::SUCCESS, status, "stderr: #{err}\nstdout: #{out}"
+                  payload = JSON.parse(out)
+                  assert_equal "reopened", payload.dig("reconciliation", "status")
+                  assert_equal 2, payload.dig("reconciliation", "generation")
+                  assert_equal oid_b, payload.dig("reconciliation", "head_oid")
+                end
+              end
+            end
+          end
+        end
+
+        assert_equal [ [ 1, oid_b ] ], reviewer_passes,
+                     "repush must start fresh pass 01 at exact head B instead of honoring old REVIEW_COMPLETE"
+        assert_equal oid_b, `git -C #{wt.shellescape} rev-parse HEAD`.strip
+        assert_equal :review_complete, Hive::Markers.current(File.join(folder, "task.md")).name
+        refute File.exist?(File.join(folder, "github-publication.json"))
+        assert_equal 2, Hive::Stages::Review::PassArchive.generation(folder)
+      ensure
+        database&.disconnect
+        Hive::RuntimeControlPlane.disconnect
+        Hive::Lock.task_lease_repository = nil
+      end
+    end
+  end
 end

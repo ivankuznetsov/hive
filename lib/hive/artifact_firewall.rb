@@ -21,6 +21,7 @@ module Hive
     class Error < StandardError; end
     class InvalidManifest < Error; end
     class CaptureError < Error; end
+    class LimitExceeded < CaptureError; end
     class InvalidSnapshot < Error; end
 
     Violation = Data.define(:kind, :label, :path, :diagnostic) do
@@ -334,6 +335,21 @@ module Hive
       rescue Hive::ProtectedFiles::RestoreError, SystemCallError => error
         raise CaptureError, "protected path restoration failed (#{error.class})"
       end
+    end
+
+    def self.tree_inventory_digest(root, max_depth: Hive::ProtectedFiles::MAX_TREE_DEPTH,
+                                   max_path_bytes: Hive::ProtectedFiles::MAX_TREE_PATH_BYTES)
+      Hive::ProtectedFiles.tree_inventory_digest(
+        root, max_depth: max_depth, max_path_bytes: max_path_bytes
+      )
+    rescue Hive::ProtectedFiles::TreeLimitError => error
+      raise LimitExceeded, error.message
+    rescue SystemCallError, IOError => error
+      raise CaptureError, "directory tree custody failed (#{error.class})"
+    end
+
+    def self.fold_membership_digest(pairs, present: true)
+      Hive::ProtectedFiles.fold_membership_digest(pairs, present: present)
     end
 
     # A single-use boundary that keeps controller bookkeeping outside the

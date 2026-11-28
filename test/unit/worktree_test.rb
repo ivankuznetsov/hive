@@ -1838,6 +1838,100 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_owned_pointer_accepts_explicit_internal_review_expectations_and_rejects_violations
+    with_initialized_project do |dir, root|
+      slug = "adhoc-review-pr-42"
+      branch = "hive/review/pr-42"
+      task_folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
+      FileUtils.mkdir_p(task_folder)
+      worktree = Hive::Worktree.new(dir, slug, worktree_root: root)
+      worktree.create!(branch, default_branch: "master")
+      pointer_path = File.join(task_folder, "worktree.yml")
+      File.write(pointer_path, { "path" => worktree.path, "branch" => branch }.to_yaml)
+
+      # Ordinary default rejects hive/review/pr-42 because it expects branch == slug.
+      assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root
+        )
+      end
+
+      # Explicit caller-derived expectations validate the owned internal review worktree.
+      pointer = Hive::Worktree.read_owned_pointer(
+        task_folder,
+        project_root: dir,
+        slug: slug,
+        expected_root: root,
+        expected_path: worktree.path,
+        expected_branch: branch
+      )
+      assert_equal File.realpath(worktree.path), pointer.fetch("path")
+      assert_equal branch, pointer.fetch("branch")
+
+      # Duplicate YAML keys (including quoted keys) fail closed.
+      File.write(pointer_path, "\"path\": #{worktree.path}\n\"path\": #{worktree.path}\nbranch: #{branch}\n")
+      dup_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root,
+          expected_path: worktree.path,
+          expected_branch: branch
+        )
+      end
+      assert_includes dup_error.message, "duplicate keys"
+
+      # Oversized pointer fails closed before YAML parse.
+      File.binwrite(pointer_path, "x" * (Hive::Worktree::STRICT_POINTER_MAX_BYTES + 1))
+      size_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root,
+          expected_path: worktree.path,
+          expected_branch: branch
+        )
+      end
+      assert_includes size_error.message, "exceeds"
+
+      # Symlinked worktree directory fails closed even if target is inside root.
+      symlink_alias = File.join(root, "symlink-alias")
+      File.symlink(worktree.path, symlink_alias)
+      File.write(pointer_path, { "path" => symlink_alias, "branch" => branch }.to_yaml)
+      sym_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root,
+          expected_path: worktree.path,
+          expected_branch: branch
+        )
+      end
+      assert_includes sym_error.message, "not a symlink"
+
+      # Detached HEAD fails closed.
+      File.write(pointer_path, { "path" => worktree.path, "branch" => branch }.to_yaml)
+      run!("git", "-C", worktree.path, "checkout", "--quiet", "--detach", "HEAD")
+      detached_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root,
+          expected_path: worktree.path,
+          expected_branch: branch
+        )
+      end
+      assert_includes detached_error.message, "expected #{branch}"
+    end
+  end
+
   def test_read_pointer_raises_worktree_error_for_non_hash_root
     Dir.mktmpdir do |folder|
       File.write(File.join(folder, "worktree.yml"), "just a string\n")

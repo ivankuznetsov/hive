@@ -1,9 +1,9 @@
 ---
 title: Hive::Attempts
 type: module
-source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
+source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb, lib/hive/internal_pr_checkout.rb
 created: 2026-07-16
-updated: 2026-11-20
+updated: 2026-11-28
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -547,3 +547,50 @@ generation and post-clear progress before binding or attaching. The daemon's
 marker-recovery consumer applies the same fence. A foreign semantic owner
 leaves the request cleared and unbound, so a fresh operator retry remains
 available after that owner ends.
+
+## Internal PR checkout admission fence
+
+For applicable `6-review` internal PR tasks (`Hive::InternalPrCheckout.applicable?`),
+`Attempts::Dispatcher` coordinates owner attachment, task-lease ordering,
+checkout reconciliation, and attempt persistence through one fenced path:
+
+- **Owner probe before lease claim.** Before acquiring the SQLite task lease,
+  the dispatcher checks for an existing compatible live or launching semantic
+  owner or request attempt. Compatible owners attach or defer with zero task
+  lease acquisition, zero provider fetches, and zero reconciliation writes.
+- **Conditional SQLite lease and release before launch.** For idle tasks, the
+  dispatcher acquires the SQLite task lease with a conditional `claim_if`
+  predicate that fails closed (`LeaseConditionFailed`) if a competing launching
+  or live attempt appeared after the owner probe. Under that single task lease,
+  it recovers verifiable local pending intent, reconciles the checkout, checks
+  queued generation tokens (superseding stale tokens with zero attempt rows, or
+  converting a current explicit queued reopen that discovered a new head into
+  one fresh idempotent B request without old predecessors or inherited outputs),
+  and inserts the launching row. The SQLite task lease is always released before
+  detached launcher handoff so the worker can claim its own execution lease
+  without contention; no code waits for a task lease while holding an open
+  attempt-store write transaction.
+- **Legacy generation-1 token compatibility.** `Attempts::Generation.artifact_token`
+  reads the committed `head_transition_digest` only after a real head transition
+  (`generation > 1`). Implicit or initial generation-1 internal PR tasks
+  contribute zero extra bytes, preserving pre-deploy attempt identity, live
+  attachment, and terminal replay. Once a head transition commits, every
+  generation producer/validator (`Dispatcher`, worker `Context`, bot writer,
+  daemon matcher, `RecoveryCoordinator`, `Remote::CommandService`,
+  `WorkflowAdmission`, and `Commands::Answer`) computes the same updated binding
+  before replay lookup or successor selection.
+- **Locked worker verification.** Inside the worker execution lease,
+  `Attempts::Context#validate_generation!` runs `:local_verify` before generic
+  rebase, marker lookup, runner construction, or agent spawn, rejecting stale
+  generations or unresolved pending transactions without remote I/O.
+- **Single monotonic deadline and foreground emitter.** Explicit reopen paths
+  (including daemon explicit queued reopens) share one monotonic network
+  deadline derived from configured network timeouts across provider observations
+  and Git transport, and daemon ticks pace deferred explicit reopens via retry
+  backoff so one stalled PR cannot starve sibling tasks.
+  `Attempts::CommandDispatch` is the single foreground emitter: for `--json` it
+  merges THIS invocation's `reconciliation` observation onto the emitted v2
+  `hive-run`/`hive-stage-action` envelope (suppressing worker/replayed
+  reconciliation on pure attach and preserving `reopened` when the newly
+  admitted worker verifies `current`); for text it renders the admission
+  observation once alongside the normal result.

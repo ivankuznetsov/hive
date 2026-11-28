@@ -682,4 +682,119 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
       yield tasks, home
     end
   end
+
+  public
+
+  def test_internal_pr_merge_watcher_binds_generation_holds_pending_and_rejects_mid_transition_drift
+    require "hive/internal_pr_checkout"
+    oid_a = "a" * 40
+    oid_b = "b" * 40
+    with_merge_project(stages: %w[6-review]) do |tasks, _home|
+      base_task = tasks.first
+      hive_state = File.join(base_task.project_root, ".hive-state")
+      slug = Hive::InternalPrCheckout::Identity.slug_for(77)
+      folder = File.join(hive_state, "stages", "6-review", slug)
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      Hive::TaskMeta.write(folder, id: 77, slug: slug, display_name: "PR 77")
+      File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n\n# PR 77\n")
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 77
+        pr_url: https://github.com/acme/app/pull/77
+        head_oid: #{oid_a}
+        base_ref_name: main
+        head_ref_name: feat
+        head_repository: acme/app
+        is_cross_repository: false
+        pr_state: OPEN
+        ---
+      MD
+      store = Hive::InternalPrCheckout::Store.new(folder)
+      store.initialize_generation_one!(
+        task_id: "0077", task_slug: slug, project: "app",
+        pr_host: "github.com", pr_repository: "acme/app", pr_number: 77,
+        pr_url: "https://github.com/acme/app/pull/77", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-77", head_oid: oid_a,
+        committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+      )
+      task = Hive::Task.new(folder)
+      Hive::TaskProjection::Reader.new(task_folder: folder).read(marker: Hive::Markers.current(task.state_file))
+
+      gh = FakeGh.new(state: "MERGED")
+      gh.head_oid = oid_a
+      closure = FakeClosure.new
+      watcher = build_watcher(gh: gh, task_closure: closure)
+
+      # 1. Pending intent holds the internal PR candidate with zero provider calls.
+      store.write_pending!(
+        "schema" => Hive::InternalPrCheckout::Store::PENDING_SCHEMA,
+        "schema_version" => 1,
+        "transaction_id" => "tx-watch-77", "phase" => "prepared", "final_confirmed" => false,
+        "task_id" => "0077", "task_slug" => slug, "project" => "app",
+        "pr_host" => "github.com", "pr_repository" => "acme/app", "pr_number" => 77,
+        "pr_url" => "https://github.com/acme/app/pull/77", "branch" => "hive/review/pr-77",
+        "worktree_path" => File.join(base_task.project_root, "wt", slug),
+        "old_generation" => 1, "after_generation" => 2,
+        "old_reviewed_oid" => oid_a, "old_candidate_oid" => oid_a, "target_oid" => oid_b,
+        "quarantine_ref" => Hive::InternalPrCheckout::Identity.quarantine_ref_for("tx-watch-77"),
+        "candidate_archive_ref" => nil,
+        "retirement_label" => Hive::InternalPrCheckout::Identity.retirement_label_for(transaction_id: "tx-watch-77", target_oid: oid_b),
+        "remote_fingerprint" => "f" * 64, "created_at" => "2026-08-29T12:01:00Z"
+      )
+      watcher.observe([ row_for(task) ], now: T0)
+      assert_empty watcher.tick(now: T0)
+      assert_empty gh.fact_calls, "pending internal PR must be held without polling GitHub"
+
+      # 2. Clear pending, observe coherent gen 1, then advance to gen 2 before tick ->
+      #    generation_status detects drift and blocks with zero GitHub polls or closure calls!
+      FileUtils.rm_f(store.pending_path)
+      watcher2 = build_watcher(gh: gh, task_closure: closure)
+      watcher2.observe([ row_for(task) ], now: T0)
+
+      FileUtils.mkdir_p(File.join(folder, "reviews", "archive", "internal-pr-reopen-gen1"))
+      store.seal_retirement!(label: "internal-pr-reopen-gen1")
+      File.write(File.join(folder, "pr.md"), File.read(File.join(folder, "pr.md")).sub(oid_a, oid_b))
+      tx2 = "tx-watch-gen2"
+      d2 = Hive::InternalPrCheckout::Store.head_transition_digest(
+        pr_url: "https://github.com/acme/app/pull/77", pr_number: 77,
+        branch: "hive/review/pr-77", reviewed_oid: oid_b,
+        generation: 2, previous_generation: 1,
+        retirement_label: "internal-pr-reopen-gen1", transaction_id: tx2
+      )
+      store.write_current!(store.read_current.merge(
+        "generation" => 2, "previous_generation" => 1,
+        "reviewed_oid" => oid_b, "candidate_oid" => oid_b,
+        "previous_reviewed_oid" => oid_a, "retirement_label" => "internal-pr-reopen-gen1",
+        "transaction_id" => tx2, "head_transition_digest" => d2
+      ))
+      store.sync_current_history_root_digest!
+
+      events = watcher2.tick(now: T0)
+      assert_equal 1, events.size
+      assert_equal :blocked, events.first[:status]
+      assert_empty gh.fact_calls, "drifted internal PR generation must stop before polling or recording"
+      assert_empty closure.calls
+
+      # 3. Coherent gen 2 observation records generation-scoped merge_observed and calls closure with oid_b.
+      gh.head_oid = oid_b
+      recorded = []
+      fake_activity = Object.new
+      fake_activity.define_singleton_method(:record) { |**attrs| recorded << attrs }
+      watcher3 = build_watcher(gh: gh, task_closure: closure)
+      watcher3.observe([ row_for(task) ], now: T0)
+      events3 = with_replaced_singleton_method(Hive::TaskActivity, :for_task, ->(*, **) { fake_activity }) do
+        watcher3.tick(now: T0)
+      end
+      assert_equal :archived, events3.first[:status]
+      assert_equal 1, closure.calls.size
+      assert_equal oid_b, closure.calls.first[:expected_head]
+      assert_equal 1, recorded.size
+      assert_equal "merge_observed", recorded.first.fetch(:kind)
+      assert_includes recorded.first.fetch(:operation_id), "gen-2:#{oid_b}"
+      assert_equal 2, recorded.first.dig(:payload, "generation")
+      assert_equal oid_b, recorded.first.dig(:payload, "head_oid")
+    end
+  end
 end

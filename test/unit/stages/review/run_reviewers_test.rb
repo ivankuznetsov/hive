@@ -2297,4 +2297,266 @@ class RunReviewersTest < Minitest::Test
                    "a digest mismatch must re-run the reviewer, not reuse the edited file"
     end
   end
+
+  def test_ae6_shadowed_review_complete_and_manual_steering_hold_and_strict_internal_pointer
+    require "hive/task"
+    require "hive/internal_pr_checkout"
+    require "hive/stages/base"
+    with_tmp_dir do |root|
+      folder = File.join(root, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      state_file = File.join(folder, "task.md")
+      # Embedded/shadowed REVIEW_COMPLETE + trailing REVIEW_WAITING + operator prose + frontmatter
+      prose = <<~MD
+        ---
+        source: ad-hoc
+        ---
+
+        Operator guidance note: keep checking edge cases.
+
+        <!-- REVIEW_COMPLETE pass=1 -->
+
+        More operator notes.
+
+        <!-- REVIEW_WAITING pass=2 -->
+      MD
+      File.write(state_file, prose)
+      assert_equal :review_waiting, Hive::Markers.current(state_file).name
+
+      removed = Hive::Markers.remove_named_markers(
+        state_file, Hive::Markers::REVIEW_MARKER_NAMES, refuse_if_current: [ :manual_steering ]
+      )
+      assert_equal :removed, removed
+      assert_equal :none, Hive::Markers.current(state_file).name,
+                   "embedded/shadowed REVIEW_COMPLETE must not resurface as current"
+      body_after = File.read(state_file)
+      assert_includes body_after, "Operator guidance note: keep checking edge cases."
+      assert_includes body_after, "More operator notes."
+      refute_includes body_after, "REVIEW_COMPLETE"
+      refute_includes body_after, "REVIEW_WAITING"
+
+      # Active MANUAL_STEERING hold: marker removal refuses and Review.run! stops before budget/agents.
+      Hive::Markers.set(state_file, :manual_steering)
+      steering_bytes = File.binread(state_file)
+      assert_equal :refused, Hive::Markers.remove_named_markers(
+        state_file, Hive::Markers::REVIEW_MARKER_NAMES, refuse_if_current: [ :manual_steering ]
+      )
+      assert_equal steering_bytes, File.binread(state_file)
+
+      task = Hive::Task.new(folder)
+      with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**) { flunk "agent must not run under MANUAL_STEERING" }) do
+        result = nil
+        _out, err = capture_io { result = Hive::Stages::Review.run!(task, { "review" => {} }) }
+        assert_equal({ commit: nil, status: :manual_steering }, result)
+        assert_match(/MANUAL_STEERING/, err)
+      end
+
+      # Strict worktree pointer accepts proven hive/review/pr-42 for internal PR review
+      # while normal tasks keep the slug-branch default.
+      head_oid = "a" * 40
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/app/pull/42
+        head_oid: #{head_oid}
+        base_ref_name: main
+        head_ref_name: feat
+        head_repository: acme/app
+        is_cross_repository: false
+        pr_state: OPEN
+        ---
+      MD
+      store = Hive::InternalPrCheckout::Store.new(folder)
+      store.initialize_generation_one!(
+        task_id: "0042", task_slug: "adhoc-review-pr-42", project: File.basename(root),
+        pr_host: "github.com", pr_repository: "acme/app", pr_number: 42,
+        pr_url: "https://github.com/acme/app/pull/42", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-42", head_oid: head_oid,
+        committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+      )
+      id = Hive::InternalPrCheckout::Identity.resolve!(task)
+      observed_kwargs = nil
+      with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer,
+        ->(_folder, **kwargs) do
+          observed_kwargs = kwargs
+          { "path" => id.expected_worktree_path, "branch" => "hive/review/pr-42" }
+        end
+      ) do
+        ptr = Hive::Stages::Base.worktree_pointer_or_exit(task)
+        assert_equal "hive/review/pr-42", ptr["branch"]
+        assert_equal "hive/review/pr-42", observed_kwargs[:expected_branch]
+        assert_equal id.expected_worktree_path, observed_kwargs[:expected_path]
+      end
+
+      normal_folder = File.join(root, ".hive-state", "stages", "6-review", "normal-task-260829-abcd")
+      FileUtils.mkdir_p(normal_folder)
+      File.write(File.join(normal_folder, "task.md"), "# Normal\n")
+      normal_task = Hive::Task.new(normal_folder)
+      normal_kwargs = nil
+      with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer,
+        ->(_folder, **kwargs) do
+          normal_kwargs = kwargs
+          { "path" => File.join(root, "wt"), "branch" => normal_task.slug }
+        end
+      ) do
+        ptr = Hive::Stages::Base.worktree_pointer_or_exit(normal_task)
+        assert_equal normal_task.slug, ptr["branch"]
+        assert_nil normal_kwargs[:expected_branch]
+      end
+    end
+  end
+
+  def test_ae7_retired_generation_artifacts_do_not_influence_active_pass_while_remaining_auditable
+    require "hive/task"
+    require "hive/stages/review/pass_archive"
+    require "hive/stages/review/triage"
+    with_tmp_dir do |root|
+      folder = File.join(root, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n# PR 42\n")
+
+      # Seed every head-bound artifact from generation 1.
+      seeded = {
+        "reviews/claude-01.md" => "## High\n- [ ] old finding\n",
+        "reviews/codex-02.md" => "## High\n- [ ] old pass 2 finding\n",
+        "reviews/escalations-02.md" => "### Q1. Old waiting question?\n",
+        "reviews/suppressed.md" => "- old suppression\n",
+        "reviews/auto-commit-scope-02.json" => '{"files":["a.rb"]}',
+        "reviews/fix-success-02.json" => '{"commit":"' + ("a" * 40) + '"}',
+        "reviews/guardrail-02.md" => "old guardrail\n",
+        "reviews/ci-blocked.md" => "old ci failure\n",
+        "reviews/browser-result-02-01.json" => '{"status":"failed"}',
+        "reviews/validation-02.json" => '{"ok":true}',
+        "github-publication.json" => '{"pr_url":"https://github.com/acme/app/pull/42"}'
+      }
+      seeded.each do |rel, content|
+        full = File.join(folder, rel)
+        FileUtils.mkdir_p(File.dirname(full))
+        File.write(full, content)
+      end
+
+      label = "internal-pr-reopen-bbbbbbbbbbbb-tx0001"
+      rel_dest = Hive::Stages::Review::PassArchive.retire!(
+        Hive::Task.new(folder),
+        label: label,
+        expiry_reason: "internal_pr_head_changed",
+        receipt: { "transaction_id" => "tx0001", "target_oid" => "b" * 40 },
+        exact_label: true
+      )
+      dest = File.join(folder, rel_dest)
+      # Archive remaining non-pass head-bound receipts (mirroring U2 reconciler).
+      Dir.children(reviews).each do |name|
+        next if name == "archive"
+        FileUtils.mv(File.join(reviews, name), File.join(dest, name))
+      end
+      FileUtils.mv(File.join(folder, "github-publication.json"), File.join(dest, "github-publication.json"))
+
+      # Active pass selection and flat globs see a completely fresh generation 2.
+      assert_equal 2, Hive::Stages::Review::PassArchive.generation(folder)
+      assert_equal 1, Hive::Stages::Review.next_pass_for(Hive::Task.new(folder), Hive::Markers::State.new(name: :none, attrs: {}, raw: nil))
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: root, task_folder: folder, default_branch: "main", pass: 1
+      )
+      assert_empty Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+      refute File.exist?(File.join(folder, "github-publication.json"))
+      refute File.exist?(File.join(reviews, "suppressed.md"))
+      refute File.exist?(File.join(reviews, "ci-blocked.md"))
+
+      # Archived generation remains intact and readable for audit.
+      assert_equal "## High\n- [ ] old finding\n", File.read(File.join(dest, "claude-01.md"))
+      assert_equal "### Q1. Old waiting question?\n", File.read(File.join(dest, "escalations-02.md"))
+      assert_equal '{"pr_url":"https://github.com/acme/app/pull/42"}', File.read(File.join(dest, "github-publication.json"))
+    end
+  end
+
+  def test_reviewer_agent_spawn_custody_blocks_failing_first_attempt_before_retry
+    require "hive/internal_pr_checkout"
+    require "hive/review_budget"
+    require "hive/reviewers/agent"
+
+    %i[new_file edit_sealed symlink].each do |tamper|
+      with_tmp_dir do |root|
+        folder = File.join(root, ".hive-state", "stages", "6-review", "adhoc-review-pr-56")
+        arch = File.join(folder, "reviews", "archive", "gen-01")
+        FileUtils.mkdir_p(arch)
+        File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n# PR 56\n")
+        File.write(File.join(folder, "pr.md"), <<~MD)
+          ---
+          source: ad-hoc
+          pr_number: 56
+          pr_url: https://github.com/acme/app/pull/56
+          head_oid: #{"a" * 40}
+          ---
+        MD
+        sealed = File.join(arch, "claude-01.md")
+        File.write(sealed, "sealed gen 1\n")
+        store = Hive::InternalPrCheckout::Store.new(folder)
+        store.initialize_generation_one!(
+          task_id: "0056", task_slug: "adhoc-review-pr-56", project: File.basename(root),
+          pr_host: "github.com", pr_repository: "acme/app", pr_number: 56,
+          pr_url: "https://github.com/acme/app/pull/56", base_ref_name: "main",
+          head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+          pr_state: "OPEN", branch: "hive/review/pr-56", head_oid: "a" * 40,
+          committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+        )
+        store.seal_retirement!(label: "gen-01")
+        store.sync_current_history_root_digest!
+
+        ctx = Hive::Reviewers::Context.new(
+          worktree_path: root, task_folder: folder, default_branch: "main", pass: 1
+        )
+        spec = {
+          "name" => "claude-review", "agent" => "claude", "output_basename" => "claude-review",
+          "skill" => "ce:code-review",
+          "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+          "timeout_sec" => 5, "max_attempts" => 2
+        }
+        adapter = Hive::Reviewers::Agent.new(spec, ctx)
+        spawn_calls = 0
+
+        err = assert_raises(Hive::ReviewBudget::Refused) do
+          adapter.send(:run_with_spawn, deadline: nil) do |_profile, _prompt, _cfg_t, _spawn_t, _attempts|
+            spawn_calls += 1
+            case tamper
+            when :new_file then File.write(File.join(arch, "injected.md"), "bad")
+            when :edit_sealed then File.write(sealed, "mutated")
+            when :symlink then File.symlink("/etc/hosts", File.join(arch, "evil-link.md"))
+            end
+            { status: :error, error_message: "attempt 1 failed" }
+          end
+        end
+        assert_includes %w[unsafe_state agent_modified_budget], err.reason, tamper.to_s
+        assert_equal 1, spawn_calls, "custody must abort failing attempt 1 before attempt 2 (#{tamper})"
+      end
+    end
+
+    # Clean control succeeds normally.
+    with_tmp_dir do |root|
+      folder = File.join(root, ".hive-state", "stages", "6-review", "adhoc-review-pr-57")
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n# PR 57\n")
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: root, task_folder: folder, default_branch: "main", pass: 1
+      )
+      spec = {
+        "name" => "claude-review", "agent" => "claude", "output_basename" => "claude-review",
+        "skill" => "ce:code-review",
+        "prompt_template" => "reviewer_claude_ce_code_review.md.erb",
+        "timeout_sec" => 5, "max_attempts" => 2
+      }
+      adapter = Hive::Reviewers::Agent.new(spec, ctx)
+      staged = adapter.send(:staged_output_path)
+      result = adapter.send(:run_with_spawn, deadline: nil) do |_profile, _prompt, _cfg_t, _spawn_t, _attempts|
+        File.write(staged, "## Low\n- [ ] clean\n")
+        { status: :ok }
+      end
+      assert_equal :ok, result.status
+      assert File.file?(adapter.output_path)
+    end
+  end
 end

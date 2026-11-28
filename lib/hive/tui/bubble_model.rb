@@ -1548,7 +1548,7 @@ module Hive
         # marker attr — that divergence is intentional: the marker keys
         # off the agent profile (for U7 classification), the flash
         # tells the operator which binary actually spawned.
-        Hive::Markers.set(row.state_file, "MANUAL_STEERING", agent: agent_name, started_at: Time.now.utc.iso8601)
+        register_manual_steering!(task, row, agent_name: agent_name)
 
         callable = lambda do
           clear_terminal_for_takeover
@@ -1568,6 +1568,8 @@ module Hive
         end
 
         [ flashed(flash_text), Hive::Tui::Subprocess.foreground_takeover_command(callable) ]
+      rescue Hive::ConcurrentRunError
+        [ flashed("task #{row.slug} is busy; retry steering once current run finishes"), nil ]
       rescue Hive::AgentProfiles::UnknownAgent
         [ flashed("unknown agent in config: #{agent_name}"), nil ]
       rescue Hive::ConfigError => e
@@ -1583,6 +1585,34 @@ module Hive
         # related IOErrors during YAML load can still surface here).
         # Sibling `archive_steer` rescues the same pair for symmetry.
         [ flashed("steer failed for #{row.slug}: #{e.class.name.split('::').last}: #{Hive::Tui::Text.sanitize(e.message)[0, 120]}"), nil ]
+      end
+
+      def register_manual_steering!(task, row, agent_name:)
+        require "hive/internal_pr_checkout/identity"
+        write_marker = lambda do
+          unless File.directory?(row.folder.to_s)
+            raise Hive::InvalidTaskPath, "task folder moved before steering started"
+          end
+          refreshed = Hive::Task.new(row.folder)
+          if task.id && refreshed.id && refreshed.id != task.id
+            raise Hive::InvalidTaskPath, "task identity changed before steering started"
+          end
+          unless refreshed.slug == task.slug
+            raise Hive::InvalidTaskPath, "task slug changed before steering started"
+          end
+
+          Hive::Markers.set(refreshed.state_file, "MANUAL_STEERING", agent: agent_name, started_at: Time.now.utc.iso8601)
+        end
+
+        begin
+          Hive::Lock.with_task_lock(task.folder, op: "manual_steering", create: false, &write_marker)
+        rescue Hive::RuntimeControlPlane::IdentityError
+          # Internal PR reviews always require lease serialization; synthetic
+          # unregistered non-internal fixtures fall back to marker lock.
+          raise if Hive::InternalPrCheckout::Identity.applicable?(task, allow_any_stage: true)
+
+          write_marker.call
+        end
       end
 
       def agent_context_paths(task)

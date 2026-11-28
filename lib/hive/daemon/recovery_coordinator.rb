@@ -154,8 +154,8 @@ module Hive
                      generation_resolver: nil, attempt_store: nil,
                      attempt_store_factory: nil,
                      runtime_digest: Hive::RuntimeIdentity.source_digest,
-                      runtime_residue_recovery: nil, review_fast_forward_adoption: nil,
-                      review_base_merge_adoption: nil)
+                     runtime_residue_recovery: nil, review_fast_forward_adoption: nil,
+                     review_base_merge_adoption: nil, internal_pr_reconciler: nil)
         @state_home = state_home
         @task_resolver = task_resolver || method(:resolve_task)
         @safety = safety.respond_to?(:call) ? safety : safety.method(:safe_to_retry?)
@@ -175,6 +175,7 @@ module Hive
           ->(task) { Hive::ReviewFastForwardAdoption.new(task: task) }
         @review_base_merge_adoption = review_base_merge_adoption ||
           ->(task) { Hive::ReviewBaseMergeAdoption.new(task: task) }
+        @internal_pr_reconciler = internal_pr_reconciler
       end
 
       # The single retry ladder. Every retry in Hive is paced by this, so
@@ -972,6 +973,54 @@ module Hive
               owner: safety_owner(assessment),
               remediation: locked_safety_reason.to_s
             )
+          end
+
+          # U5.4: Under RecoveryCoordinator's existing lease, reconcile an
+          # applicable internal PR review before deciding whether to clear any
+          # marker. Only `current` may clear the compared REVIEW_ERROR /
+          # REVIEW_CI_STALE marker for same-head retry; `reopened` supersedes
+          # the old recovery request; `busy`/`blocked` never clear a marker.
+          if internal_pr_review_applicable?(locked_task)
+            pr_result = reconcile_internal_pr_for_recovery(locked_task, current_request)
+            if pr_result.reopened?
+              return block_request(
+                current_request,
+                "generation_conflict",
+                owner: "hive",
+                remediation: "PR ##{pr_result.pr_number} moved to #{pr_result.head_oid[0, 12]} " \
+                             "(generation #{pr_result.generation}); old recovery superseded by reopened head"
+              )
+            elsif pr_result.busy?
+              if pr_result.reason == "task_locked"
+                return receipt(
+                  "running", request_id: current_request.request_id,
+                  phase: recovery["phase"], failure_origin: recovery["failure_origin"],
+                  owner: "agent", reason: pr_result.reason,
+                  remediation: pr_result.guidance, retry_count: recovery["retry_count"]
+                )
+              end
+              return receipt(
+                "blocked", request_id: current_request.request_id,
+                phase: recovery["phase"], failure_origin: recovery["failure_origin"],
+                owner: "operator", reason: pr_result.reason,
+                remediation: pr_result.guidance, retry_count: recovery["retry_count"]
+              )
+            elsif pr_result.blocked?
+              if pr_result.retryable
+                return receipt(
+                  "blocked", request_id: current_request.request_id,
+                  phase: recovery["phase"], failure_origin: recovery["failure_origin"],
+                  owner: "hive", reason: pr_result.reason,
+                  remediation: pr_result.guidance, retry_count: recovery["retry_count"]
+                )
+              end
+              return block_request(
+                current_request,
+                pr_result.reason,
+                owner: "operator",
+                remediation: pr_result.guidance
+              )
+            end
           end
 
           generation = generation_for_current(
@@ -2130,6 +2179,36 @@ module Hive
         # Reuse it while TaskResolver enforces project and stage identity.
         target = folder.to_s.empty? ? slug : folder
         Hive::TaskResolver.new(target, project_filter: project, stage_filter: stage).resolve
+      end
+
+      def internal_pr_review_applicable?(task)
+        return false unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+        stage = task.respond_to?(:stage_name) ? task.stage_name.to_s : File.basename(File.dirname(task.folder.to_s))
+        return false unless %w[review 6-review].include?(stage)
+
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout.applicable?(task)
+      end
+
+      def reconcile_internal_pr_for_recovery(task, request)
+        require "hive/internal_pr_checkout"
+        explicit = %w[action bot cli web].include?(request.requestor.to_s) &&
+                   !request.trigger.to_s.start_with?("recovery/admission_failure", "recovery/markerless_failure")
+        mode = explicit ? :explicit_reopen : :local_verify
+        deadline = if explicit
+          root = task.respond_to?(:project_root) ? task.project_root : nil
+          Hive::InternalPrCheckout.monotonic_deadline(project_root: root)
+        end
+        if @internal_pr_reconciler
+          @internal_pr_reconciler.call(
+            task: task, mode: mode, deadline: deadline, lock_held: true
+          )
+        else
+          Hive::InternalPrCheckout.reconcile(
+            task: task, mode: mode, deadline: deadline, lock_held: true
+          )
+        end
       end
 
       def resolve_generation(task, project:, intended_stage:, state_file_content:,

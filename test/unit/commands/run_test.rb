@@ -1438,4 +1438,265 @@ class CommandsRunTest < Minitest::Test
     assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
     assert_includes payload.fetch("message"), "attempt-lost"
   end
+
+  def test_direct_nondurable_run_reconciles_internal_pr_under_lease_before_rebase_or_runner
+    require "hive/internal_pr_checkout"
+
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "Review PR 42\n")
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{"a" * 40}
+        ---
+        PR 42
+      MD
+      prepare_test_task_lease_repository(folder)
+      resolved = task(
+        folder: folder, stage_name: "review", stage_index: 6,
+        state_file: state_file, hive_state_path: hive_state
+      )
+      resolved.slug = "adhoc-review-pr-42"
+      resolved.project_root = dir
+
+      events = []
+      reopened = Hive::InternalPrCheckout::Result.new(
+        status: "reopened", reason: "head_changed", task_slug: "adhoc-review-pr-42",
+        pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 2, head_oid: "b" * 40, previous_head_oid: "a" * 40,
+        candidate_oid: "b" * 40, transaction_id: "tx-direct-1",
+        pr_observation: { "state" => "OPEN", "head_oid" => "b" * 40, "generation" => 2 },
+        guidance: "reopened to gen 2"
+      )
+      observed_in_runner = nil
+      run_cmd = command(json: true)
+      run_cmd.define_singleton_method(:resolve_task) { resolved }
+      run_cmd.define_singleton_method(:perform_rebase) do |t, cfg, marker: nil|
+        events << :rebase
+        require "hive/rebase"
+        Hive::Rebase.perform(t, cfg)
+      end
+      run_cmd.define_singleton_method(:pick_runner) do |_t|
+        lambda do |_t, _cfg|
+          events << :runner
+          observed_in_runner = Hive::InternalPrCheckout.current_pr_observation
+          { commit: nil, status: :review_complete }
+        end
+      end
+      run_cmd.define_singleton_method(:commit_after) { |*, **| }
+
+      out = nil
+      test_case = self
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_t) { }) do
+        with_replaced_singleton_method(Hive::InternalPrCheckout, :reconcile, lambda { |task:, mode:, deadline:, lock_held:|
+          test_case.assert lock_held
+          test_case.assert_equal :explicit_reopen, mode
+          test_case.assert_kind_of Float, deadline
+          events << :reconcile
+          reopened
+        }) do
+          out, = capture_io { run_cmd.call }
+        end
+      end
+
+      assert_equal %i[reconcile rebase runner], events
+      assert_equal({ "state" => "OPEN", "head_oid" => "b" * 40, "generation" => 2 }, observed_in_runner)
+      payload = JSON.parse(out)
+      assert_equal "published_review_branch", payload.dig("rebase", "reason")
+      assert_equal "reopened", payload.dig("reconciliation", "status")
+      assert_equal "head_changed", payload.dig("reconciliation", "reason")
+      assert_equal 2, payload.dig("reconciliation", "generation")
+
+      # Blocked preflight fails closed with typed error envelope and zero rebase/runner calls.
+      events.clear
+      blocked = Hive::InternalPrCheckout::Result.new(
+        status: "blocked", reason: "pointer_unowned", retryable: false,
+        task_slug: "adhoc-review-pr-42", guidance: "pointer is unowned"
+      )
+      blocked_cmd = command(json: true)
+      blocked_cmd.define_singleton_method(:resolve_task) { resolved }
+      blocked_cmd.define_singleton_method(:perform_rebase) { |*, **| flunk "rebase must not run when blocked" }
+      blocked_cmd.define_singleton_method(:pick_runner) { |_t| flunk "runner must not run when blocked" }
+      blocked_out = nil
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_t) { }) do
+        with_replaced_singleton_method(Hive::InternalPrCheckout, :reconcile, ->(**) { blocked }) do
+          blocked_out, = capture_io do
+            err = assert_raises(Hive::Attempts::ReconciliationBlocked) { blocked_cmd.call }
+            assert_equal blocked, err.reconciliation
+          end
+        end
+      end
+      err_payload = JSON.parse(blocked_out)
+      assert_equal false, err_payload.fetch("ok")
+      assert_equal "blocked", err_payload.dig("reconciliation", "status")
+      assert_equal "pointer_unowned", err_payload.dig("reconciliation", "reason")
+    end
+  end
+
+  def test_durable_worker_rejects_stale_generation_before_rebase_marker_or_runner
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "Review\n")
+      prepare_test_task_lease_repository(folder)
+      resolved = task(
+        folder: folder, stage_name: "review", stage_index: 6,
+        state_file: state_file, hive_state_path: hive_state
+      )
+      resolved.slug = "adhoc-review-pr-42"
+      resolved.project_root = dir
+
+      fake_ctx = Object.new
+      fake_ctx.define_singleton_method(:attempt_id) { "att-stale-1" }
+      fake_ctx.define_singleton_method(:ownership_generation) { "gen-old" }
+      fake_ctx.define_singleton_method(:task_generation) { 0 }
+      fake_ctx.define_singleton_method(:validate_generation!) do |_t|
+        raise Hive::ConcurrentRunError, "durable attempt generation is stale"
+      end
+      run_cmd = command(quiet: true)
+      run_cmd.define_singleton_method(:resolve_task) { resolved }
+      run_cmd.define_singleton_method(:perform_rebase) { |*, **| flunk "rebase must not run for stale worker" }
+      run_cmd.define_singleton_method(:pick_runner) { |_t| flunk "runner must not construct for stale worker" }
+
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_t) { }) do
+        with_replaced_singleton_method(Hive::Attempts::Context, :active?, -> { true }) do
+          with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { fake_ctx }) do
+            with_replaced_singleton_method(Hive::Markers, :current, ->(_p) { flunk "marker lookup must not run for stale worker" }) do
+              assert_raises(Hive::ConcurrentRunError) { run_cmd.call }
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_durable_cli_reconciliation_merges_invocation_observation_and_suppresses_on_attach
+    require "hive/internal_pr_checkout"
+
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      folder = File.join(hive_state, "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "pr.md"), <<~MD)
+        ---
+        source: ad-hoc
+        pr_number: 42
+        pr_url: https://github.com/acme/repo/pull/42
+        head_oid: #{"b" * 40}
+        ---
+        PR 42
+      MD
+      resolved = task(folder: folder, stage_name: "review", stage_index: 6, hive_state_path: hive_state)
+      resolved.slug = "adhoc-review-pr-42"
+      resolved.project_root = dir
+
+      worker_json = JSON.generate({
+        "schema" => "hive-run", "schema_version" => 2, "ok" => true,
+        "slug" => "adhoc-review-pr-42", "stage" => "review", "stage_index" => 6,
+        "folder" => folder, "state_file" => File.join(folder, "task.md"),
+        "marker" => "review_complete", "attrs" => {}, "commit_action" => nil,
+        "next_action" => { "kind" => "no_op" },
+        "rebase" => {
+          "attempted" => false, "commits_behind" => nil, "succeeded" => false,
+          "agent_resolutions" => 0, "resolved_files" => [],
+          "reason" => "published_review_branch", "post_rebase_warnings" => []
+        },
+        "reconciliation" => {
+          "status" => "current", "reason" => "head_unchanged",
+          "retryable" => false, "guidance" => "worker local verify"
+        }
+      })
+
+      reopened_rec = Hive::InternalPrCheckout::Result.new(
+        status: "reopened", reason: "head_changed", task_slug: "adhoc-review-pr-42",
+        pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 2, head_oid: "b" * 40, previous_head_oid: "a" * 40, guidance: "reopened"
+      )
+      current_rec = Hive::InternalPrCheckout::Result.new(
+        status: "current", reason: "head_unchanged", task_slug: "adhoc-review-pr-42",
+        pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 2, head_oid: "b" * 40, guidance: "unchanged"
+      )
+
+      # Call 1: First durable CLI call returns `reopened` even though attached worker emitted `current`.
+      api1 = Object.new
+      captured_kwargs = nil
+      api1.define_singleton_method(:dispatch) do |**kwargs|
+        captured_kwargs = kwargs
+        kwargs.fetch(:stdout).write("#{worker_json}\n")
+        kwargs.fetch(:stderr).write("worker-stderr\n")
+        Hive::Attempts::ClientResult.new(
+          status: :terminal, exit_status: 0, outcome: "succeeded",
+          receipt: {}, attempt_id: "att-1", stdout_bytes: worker_json.bytesize + 1,
+          reconciliation: reopened_rec
+        )
+      end
+      cmd1 = command(durable: true, json: true, attempt_entrypoint: api1)
+      cmd1.define_singleton_method(:resolve_task) { resolved }
+      out1, err1 = capture_io { cmd1.call }
+      assert_equal :explicit_reopen, captured_kwargs.fetch(:reconcile_mode)
+      assert_kind_of Float, captured_kwargs.fetch(:reconcile_deadline)
+      assert_equal "worker-stderr\n", err1
+      doc1 = JSON.parse(out1)
+      assert_equal "reopened", doc1.dig("reconciliation", "status")
+      assert_equal "head_changed", doc1.dig("reconciliation", "reason")
+
+      # Call 2: Subsequent terminal replay returns today's `current` observation in one JSON document.
+      api2 = Object.new
+      api2.define_singleton_method(:dispatch) do |**kwargs|
+        kwargs.fetch(:stdout).write("#{worker_json}\n")
+        Hive::Attempts::ClientResult.new(
+          status: :terminal, exit_status: 0, outcome: "succeeded",
+          receipt: {}, attempt_id: "att-1", stdout_bytes: worker_json.bytesize + 1,
+          reconciliation: current_rec
+        )
+      end
+      cmd2 = command(durable: true, json: true, attempt_entrypoint: api2)
+      cmd2.define_singleton_method(:resolve_task) { resolved }
+      out2, = capture_io { cmd2.call }
+      doc2 = JSON.parse(out2)
+      assert_equal "current", doc2.dig("reconciliation", "status")
+      assert_equal "head_unchanged", doc2.dig("reconciliation", "reason")
+
+      # Call 3: Pure attach (reconciliation: nil) suppresses the worker's reconciliation field.
+      api3 = Object.new
+      api3.define_singleton_method(:dispatch) do |**kwargs|
+        kwargs.fetch(:stdout).write("#{worker_json}\n")
+        Hive::Attempts::ClientResult.new(
+          status: :terminal, exit_status: 0, outcome: "succeeded",
+          receipt: {}, attempt_id: "att-1", stdout_bytes: worker_json.bytesize + 1,
+          reconciliation: nil
+        )
+      end
+      cmd3 = command(durable: true, json: true, attempt_entrypoint: api3)
+      cmd3.define_singleton_method(:resolve_task) { resolved }
+      out3, = capture_io { cmd3.call }
+      doc3 = JSON.parse(out3)
+      refute doc3.key?("reconciliation"), "pure attach must suppress worker reconciliation field"
+
+      # Call 4: Text mode renders the admission observation once alongside worker output.
+      api4 = Object.new
+      api4.define_singleton_method(:dispatch) do |**_kwargs|
+        puts "hive: marker=review_complete"
+        Hive::Attempts::ClientResult.new(
+          status: :terminal, exit_status: 0, outcome: "succeeded",
+          receipt: {}, attempt_id: "att-2", stdout_bytes: 28,
+          reconciliation: reopened_rec
+        )
+      end
+      cmd4 = command(durable: true, json: false, attempt_entrypoint: api4)
+      cmd4.define_singleton_method(:resolve_task) { resolved }
+      out4, = capture_io { cmd4.call }
+      assert_equal 1, out4.scan("internal-pr reconciliation").length
+      assert_includes out4, "status=reopened"
+    end
+  end
 end

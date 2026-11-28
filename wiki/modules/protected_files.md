@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-11-06
+updated: 2026-11-28
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -211,6 +211,19 @@ Hive keeps stage semantics above the facade:
 - `Stages::Review`, `Review::Triage`, and `Review::CiFix` supply pass-specific
   escalation, suppression, guardrail, error, and success anchors. Triage also
   requires a non-empty regular escalations artifact.
+- **Constant-anchor internal PR checkout custody.** For `source: ad-hoc`
+  internal PR reviews, `ReviewBudget` and `InternalPrCheckout::Store` protect a
+  constant set of fixed controller anchors (`pr.md`,
+  `internal-pr-checkout/{current,pending,candidate,history-root,grant-index}.json`)
+  and seal every retired `reviews/archive/<label>/` generation into chained
+  manifests anchored by `history-root.json`, with O(1) bucketed historical grant
+  lookup so archive growth never exhausts firewall manifest entry limits.
+  Before/after streaming no-follow inventory and anchor verification run at
+  every actual spawn boundary — review fix, Triage, CI-fix, every reviewer
+  adapter (`Reviewers::Agent` and `Reviewers::Runtime.capture`), and every
+  `BrowserTest.run_attempt` — in `ensure` across success, nonzero exit,
+  exception, timeout, and failing first attempts before any retry or output
+  acceptance.
 - `Stages::AgentWorktree` combines task anchors and named local/global Git
   control anchors in one capture, requires a regular in-root
   `fix-report.md`, and leaves repository/report semantics to

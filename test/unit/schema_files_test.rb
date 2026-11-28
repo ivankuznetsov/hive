@@ -1729,6 +1729,101 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_hive_run_and_stage_action_schemas_validate_reconciliation_envelopes_and_reject_malformed
+    require "hive/internal_pr_checkout"
+    require "hive/attempts/contracts"
+
+    run_schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-run"))))
+    stage_schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action"))))
+
+    base_run = {
+      "schema" => "hive-run",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"),
+      "ok" => true,
+      "slug" => "adhoc-review-pr-42",
+      "stage" => "review",
+      "stage_index" => 6,
+      "folder" => "/tmp/adhoc-review-pr-42",
+      "state_file" => "/tmp/adhoc-review-pr-42/task.md",
+      "marker" => "review_complete",
+      "attrs" => {},
+      "commit_action" => nil,
+      "next_action" => { "kind" => "no_op" },
+      "rebase" => {
+        "attempted" => false, "commits_behind" => nil, "succeeded" => false,
+        "agent_resolutions" => 0, "resolved_files" => [],
+        "reason" => "published_review_branch", "post_rebase_warnings" => []
+      }
+    }
+    base_stage = {
+      "schema" => "hive-stage-action",
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-stage-action"),
+      "ok" => true,
+      "verb" => "review",
+      "phase" => "ran",
+      "noop" => false,
+      "slug" => "adhoc-review-pr-42",
+      "from_stage_dir" => "5-open-pr",
+      "to_stage_dir" => "6-review",
+      "task_folder" => "/tmp/adhoc-review-pr-42",
+      "marker_after" => "review_complete",
+      "next_action" => { "key" => "ready_to_artifacts", "label" => "Ready", "command" => nil }
+    }
+
+    success_results = [
+      Hive::InternalPrCheckout::Result.new(
+        status: "current", reason: "head_unchanged", task_slug: "adhoc-review-pr-42",
+        task_id: "42", pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 1, head_oid: "a" * 40, candidate_oid: "a" * 40, guidance: "unchanged"
+      ),
+      Hive::InternalPrCheckout::Result.new(
+        status: "reopened", reason: "head_changed", task_slug: "adhoc-review-pr-42",
+        task_id: "42", pr_number: 42, pr_url: "https://github.com/acme/repo/pull/42",
+        generation: 2, head_oid: "b" * 40, previous_head_oid: "a" * 40,
+        candidate_oid: "b" * 40, transaction_id: "tx-1", guidance: "reopened"
+      )
+    ]
+    success_results.each do |rec|
+      run_doc = base_run.merge("reconciliation" => rec.to_h)
+      stage_doc = base_stage.merge("reconciliation" => rec.to_h)
+      assert run_schemer.valid?(run_doc), "hive-run must accept #{rec.status}: #{run_schemer.validate(run_doc).to_a.inspect}"
+      assert stage_schemer.valid?(stage_doc), "hive-stage-action must accept #{rec.status}: #{stage_schemer.validate(stage_doc).to_a.inspect}"
+    end
+
+    busy_rec = Hive::InternalPrCheckout::Result.new(
+      status: "busy", reason: "task_locked", retryable: true,
+      task_slug: "adhoc-review-pr-42", guidance: "locked"
+    )
+    blocked_rec = Hive::InternalPrCheckout::Result.new(
+      status: "blocked", reason: "pointer_unowned", retryable: false,
+      task_slug: "adhoc-review-pr-42", guidance: "pointer is unowned"
+    )
+    [
+      [ Hive::Attempts::ReconciliationBusy.new("busy", reconciliation: busy_rec), "concurrent_run", "error" ],
+      [ Hive::Attempts::ReconciliationBlocked.new("blocked", reconciliation: blocked_rec), "error", "error" ]
+    ].each do |err, run_kind, stage_kind|
+      run_err = Hive::Schemas::ErrorEnvelope.build(schema: "hive-run", error: err, error_kind: run_kind)
+      stage_err = Hive::Schemas::ErrorEnvelope.build(
+        schema: "hive-stage-action", error: err, error_kind: stage_kind, extras: { "verb" => "review" }
+      )
+      assert run_schemer.valid?(run_err), "hive-run error must accept #{err.reconciliation.status}: #{run_schemer.validate(run_err).to_a.inspect}"
+      assert stage_schemer.valid?(stage_err), "hive-stage-action error must accept #{err.reconciliation.status}: #{stage_schemer.validate(stage_err).to_a.inspect}"
+    end
+
+    # Reject malformed or unbounded reconciliation fields.
+    invalid_reconciliations = [
+      { "status" => "bogus", "reason" => "head_unchanged", "retryable" => false, "guidance" => "x" },
+      { "status" => "current", "reason" => "unknown_reason", "retryable" => false, "guidance" => "x" },
+      { "status" => "current", "reason" => "head_unchanged", "retryable" => false, "guidance" => "x" * 513 },
+      { "status" => "current", "reason" => "head_unchanged", "retryable" => false, "guidance" => "x", "head_oid" => "not-a-sha" },
+      { "status" => "current", "reason" => "head_unchanged", "retryable" => false, "guidance" => "x", "extra" => 1 }
+    ]
+    invalid_reconciliations.each do |bad|
+      refute run_schemer.valid?(base_run.merge("reconciliation" => bad)), "hive-run must reject #{bad.inspect}"
+      refute stage_schemer.valid?(base_stage.merge("reconciliation" => bad)), "hive-stage-action must reject #{bad.inspect}"
+    end
+  end
+
   # ── hive-metrics-rollback-rate ─────────────────────────────────────────
 
   def test_hive_metrics_rollback_rate_schema_file_exists_and_is_valid_json
@@ -3269,6 +3364,39 @@ class SchemaFilesTest < Minitest::Test
       )
       assert schemer.valid?(payload),
              "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
+    end
+  end
+
+  def test_hive_status_v9_declares_closed_internal_pr_reconciliation_without_changing_dependency_admission_mirrors
+    require "hive/internal_pr_checkout"
+    require "hive/dependency_admission"
+
+    status_doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    rec_def = status_doc.dig("$defs", "InternalPrReconciliation")
+    assert_kind_of Hash, rec_def
+    assert_equal false, rec_def.fetch("additionalProperties")
+    assert_equal Hive::InternalPrCheckout::STATUSES.sort,
+                 rec_def.dig("properties", "status", "enum").sort
+    assert_equal Hive::InternalPrCheckout::REASONS_BY_STATUS.values.flatten.sort,
+                 rec_def.dig("properties", "reason", "enum").sort
+    assert_equal "#/$defs/InternalPrReconciliation",
+                 status_doc.dig("$defs", "Task", "properties", "reconciliation", "$ref")
+
+    # Verify DependencyAdmission::REASON_CODES and its four schema mirrors remain untouched.
+    expected_codes = Hive::DependencyAdmission::REASON_CODES.sort
+    refute_includes expected_codes, "transition_interrupted"
+    refute_includes expected_codes, "pending_invalid"
+    {
+      "hive-status" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ],
+      "hive-run" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ],
+      "hive-approve" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ],
+      "hive-stage-action" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ]
+    }.each do |schema_name, path|
+      doc = JSON.parse(File.read(Hive::Schemas.schema_path(schema_name)))
+      enum = doc.dig(*path)
+      next unless enum
+
+      assert_equal expected_codes, enum.sort, "#{schema_name} AdmissionError reason_code enum must stay intact"
     end
   end
 end

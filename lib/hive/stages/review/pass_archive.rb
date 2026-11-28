@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "hive/atomic_file"
+require "hive/errors"
 
 module Hive
   module Stages
@@ -21,10 +22,13 @@ module Hive
       # Unnumbered state (`ci-blocked.md`, `deferred-findings.md`,
       # `suppressed.md`) and subdirectories stay in place.
       module PassArchive
+        class ConflictingArchiveError < Hive::Error; end
+
         ARCHIVE_DIR = "archive".freeze
         NUMBERED_PASS_RE = /\A.+-\d{2}\.md\z/
         RETIREMENT_RECEIPT = "retirement.json".freeze
         RETIREMENT_SCHEMA = "hive.review-generation-retirement".freeze
+        EXACT_LABEL_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
 
         module_function
 
@@ -39,14 +43,36 @@ module Hive
         # A retry after an interruption finds that receipt and finishes the
         # move into the same directory instead of starting another one; with
         # a receipt the directory is created even when nothing is left to
-        # move. Returns the task-relative archive directory, or nil.
-        def retire!(task, label:, expiry_reason:, receipt: nil)
+        # move.
+        #
+        # When `exact_label: true` (transaction-bound internal PR retirement),
+        # `label` is reserved strictly without numeric suffix fallback:
+        # - resumes cleanly across directory creation before `retirement.json`,
+        #   expiry before receipt, partial renames, and empty passes;
+        # - verifies ownership against `receipt` and `prior_labels`;
+        # - refuses any conflicting existing directory (`ConflictingArchiveError`).
+        #
+        # Returns the task-relative archive directory, or nil.
+        def retire!(task, label:, expiry_reason:, receipt: nil, exact_label: false,
+                    prior_labels: nil, failpoint: nil)
           require "hive/review_budget"
           require "hive/review_pass"
           reviews = File.join(task.folder, "reviews")
           return nil unless File.directory?(reviews) && !File.symlink?(reviews)
 
           document = receipt && retirement_document(receipt, expiry_reason)
+          if exact_label
+            return retire_exact_label!(
+              task,
+              reviews: reviews,
+              label: label,
+              expiry_reason: expiry_reason,
+              document: document,
+              prior_labels: Array(prior_labels),
+              failpoint: failpoint
+            )
+          end
+
           relative = document && existing_retirement(task.folder, document)
           names = Dir.children(reviews).select do |name|
             (Hive::ReviewPass.number(name) || Hive::ReviewPass.budget_receipt?(name)) &&
@@ -70,6 +96,96 @@ module Hive
           Hive::AtomicFile.fsync_directory(reviews)
           relative
         end
+
+        def retire_exact_label!(task, reviews:, label:, expiry_reason:, document:, prior_labels:, failpoint:)
+          raise ArgumentError, "exact_label retirement requires a deterministic receipt" unless document
+
+          safe_label = label.to_s
+          unless safe_label.match?(EXACT_LABEL_RE)
+            raise ConflictingArchiveError, "reserved archive label #{label.inspect} is invalid"
+          end
+
+          root = File.join(reviews, ARCHIVE_DIR)
+          if present?(root)
+            root_stat = File.lstat(root)
+            unless root_stat.directory? && !root_stat.symlink?
+              raise ConflictingArchiveError, "reviews/archive must be a real directory"
+            end
+          end
+
+          target_dir = File.join(root, safe_label)
+          relative = File.join("reviews", ARCHIVE_DIR, safe_label)
+          names = Dir.children(reviews).select do |name|
+            (Hive::ReviewPass.number(name) || Hive::ReviewPass.budget_receipt?(name)) &&
+              File.lstat(File.join(reviews, name)).then { |stat| stat.file? || stat.symlink? }
+          end.sort_by { |name| Hive::ReviewPass.sort_key(name) }
+
+          receipt_written = false
+          dir_exists = present?(target_dir)
+          if dir_exists
+            stat = File.lstat(target_dir)
+            unless stat.directory? && !stat.symlink?
+              raise ConflictingArchiveError, "archive target #{relative} is not a real directory"
+            end
+
+            receipt_path = File.join(target_dir, RETIREMENT_RECEIPT)
+            if present?(receipt_path)
+              rstat = File.lstat(receipt_path)
+              unless rstat.file? && !rstat.symlink?
+                raise ConflictingArchiveError, "archive receipt in #{relative} is not a regular file"
+              end
+              existing = begin
+                JSON.parse(File.open(receipt_path, File::RDONLY | File::NOFOLLOW) { |f| f.read(64 * 1024) })
+              rescue JSON::ParserError
+                raise ConflictingArchiveError, "archive receipt in #{relative} is malformed JSON"
+              end
+              unless existing == document
+                raise ConflictingArchiveError, "archive #{relative} already belongs to a different retirement"
+              end
+              receipt_written = true
+            else
+              if prior_labels.include?(safe_label) || !Dir.empty?(target_dir)
+                raise ConflictingArchiveError, "archive #{relative} already exists without matching retirement receipt"
+              end
+            end
+          end
+
+          unless receipt_written
+            if names.any? { |name| Hive::ReviewPass.budget_receipt?(name) }
+              Hive::ReviewBudget.new(task: task, project: task.project_name).record_expiry!(reason: expiry_reason)
+              failpoint&.call(:after_budget_expiry, label: safe_label)
+            end
+            unless dir_exists
+              unless present?(root)
+                Dir.mkdir(root, 0o700)
+                Hive::AtomicFile.fsync_directory(reviews)
+              end
+              Dir.mkdir(target_dir)
+              Hive::AtomicFile.fsync_directory(root)
+              failpoint&.call(:after_archive_dir_created, label: safe_label)
+            end
+            write_retirement(target_dir, document)
+            Hive::AtomicFile.fsync_directory(target_dir)
+            failpoint&.call(:after_retirement_receipt, label: safe_label)
+          end
+
+          moved_first = false
+          names.each do |name|
+            dest = File.join(target_dir, name)
+            if present?(dest)
+              raise ConflictingArchiveError, "archive #{relative} already contains #{name}"
+            end
+            File.rename(File.join(reviews, name), dest)
+            unless moved_first
+              moved_first = true
+              failpoint&.call(:after_first_archive_move, label: safe_label, file: name)
+            end
+          end
+          Hive::AtomicFile.fsync_directory(target_dir)
+          Hive::AtomicFile.fsync_directory(reviews)
+          relative
+        end
+        private_class_method :retire_exact_label!
 
         def retirement_document(receipt, expiry_reason)
           { "schema" => RETIREMENT_SCHEMA, "schema_version" => 1,

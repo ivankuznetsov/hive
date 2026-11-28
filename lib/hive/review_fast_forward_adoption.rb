@@ -73,6 +73,9 @@ module Hive
     def adopt!(marker:)
       return nil unless self.class.candidate?(marker)
 
+      require "hive/internal_pr_checkout"
+      return nil if Hive::InternalPrCheckout.applicable?(@task)
+
       evidence = Hive::ReviewPublicationRecovery.decode(marker.attrs) || {}
       reviewed = evidence["local_head"].to_s.downcase
       return nil unless reviewed.match?(OID) && Hive::Gh.parse_pull_request_url(evidence["pr_url"])

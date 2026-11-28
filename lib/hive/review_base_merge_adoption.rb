@@ -70,6 +70,9 @@ module Hive
     def adopt!(marker:)
       return nil unless self.class.candidate?(marker)
 
+      require "hive/internal_pr_checkout"
+      return nil if Hive::InternalPrCheckout.applicable?(@task)
+
       blocked = (Hive::ReviewPublicationRecovery.decode(marker.attrs) || {})["local_head"].to_s.downcase
       return nil unless blocked.match?(OID)
 

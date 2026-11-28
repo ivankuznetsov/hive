@@ -2499,4 +2499,114 @@ class TaskActionTest < Minitest::Test
       end
     end
   end
+
+  def test_internal_pr_read_only_snapshot_discards_pre_pause_marker_across_transitions_and_rollbacks
+    require "hive/internal_pr_checkout"
+    oid_a = "a" * 40
+    oid_b = "b" * 40
+    Dir.mktmpdir("task-action-internal-pr-pause") do |root|
+      folder = File.join(root, ".hive-state", "stages", "6-review", "adhoc-review-pr-42")
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: ad-hoc\n---\n\n# PR 42\n")
+      Hive::Markers.set(state_file, :review_complete, "pass" => "1")
+      pr_path = File.join(folder, "pr.md")
+      write_pr = lambda do |oid|
+        File.write(pr_path, <<~MD)
+          ---
+          source: ad-hoc
+          pr_number: 42
+          pr_url: https://github.com/acme/app/pull/42
+          head_oid: #{oid}
+          base_ref_name: main
+          head_ref_name: feat
+          head_repository: acme/app
+          is_cross_repository: false
+          pr_state: OPEN
+          ---
+        MD
+      end
+      write_pr.call(oid_a)
+      store = Hive::InternalPrCheckout::Store.new(folder)
+      store.initialize_generation_one!(
+        task_id: "0042", task_slug: "adhoc-review-pr-42", project: File.basename(root),
+        pr_host: "github.com", pr_repository: "acme/app", pr_number: 42,
+        pr_url: "https://github.com/acme/app/pull/42", base_ref_name: "main",
+        head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+        pr_state: "OPEN", branch: "hive/review/pr-42", head_oid: oid_a,
+        committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+      )
+      task = FakeTask.new(
+        stage_name: "review", stage_index: 6, slug: "adhoc-review-pr-42",
+        project_root: root, project_name: File.basename(root),
+        folder: folder, state_file: state_file
+      )
+
+      # 1. Caller samples pre-pause marker (REVIEW_COMPLETE from A), then A->B completes
+      #    before TaskAction classifies -> TaskAction rereads fresh state under snapshot and
+      #    NEVER reports the stale pre-pause review_parked action.
+      stale_marker = Hive::Markers.current(state_file)
+      assert_equal :review_complete, stale_marker.name
+
+      Hive::Markers.remove_named_markers(state_file, Hive::Markers::REVIEW_MARKER_NAMES)
+      write_pr.call(oid_b)
+      FileUtils.mkdir_p(File.join(folder, "reviews", "archive", "internal-pr-reopen-gen1"))
+      store.seal_retirement!(label: "internal-pr-reopen-gen1")
+      tx2 = "tx-gen2-0001"
+      d2 = Hive::InternalPrCheckout::Store.head_transition_digest(
+        pr_url: "https://github.com/acme/app/pull/42", pr_number: 42,
+        branch: "hive/review/pr-42", reviewed_oid: oid_b,
+        generation: 2, previous_generation: 1,
+        retirement_label: "internal-pr-reopen-gen1", transaction_id: tx2
+      )
+      store.write_current!(store.read_current.merge(
+        "generation" => 2, "previous_generation" => 1,
+        "reviewed_oid" => oid_b, "candidate_oid" => oid_b,
+        "previous_reviewed_oid" => oid_a, "retirement_label" => "internal-pr-reopen-gen1",
+        "transaction_id" => tx2, "head_transition_digest" => d2
+      ))
+      store.sync_current_history_root_digest!
+
+      action = Hive::TaskAction.for(task, stale_marker)
+      assert_equal "ready_for_review", action.key
+      assert_equal :none, action.marker.name
+
+      # 2. Pause read_only_snapshot mid-read across an A->B->A transition or a rollback
+      #    that increments lease_version even when committed bytes return to the same OID:
+      #    the first torn sample MUST be discarded and retried (or busy if retries exhaust).
+      lease_version = 1
+      fake_repo = Object.new
+      fake_repo.define_singleton_method(:lease_snapshot) do |_folder|
+        { idle: true, lease_version: lease_version }
+      end
+
+      calls = 0
+      snap = Hive::InternalPrCheckout.read_only_snapshot(task, lease_repository: fake_repo, max_retries: 3) do |s|
+        calls += 1
+        if calls == 1
+          # Simulate full rollback / A->B->A while reader was paused: lease version bumps!
+          lease_version += 1
+          :stale_sample
+        else
+          [ :fresh_coherent, s.reviewed_oid ]
+        end
+      end
+      assert_predicate snap, :coherent?
+      assert_equal 2, calls, "torn sample across lease-version bump must be discarded and retried"
+      assert_equal [ :fresh_coherent, oid_b ], snap.sampled_value
+
+      # 3. Exhausting retries under continuous concurrent churn returns busy (never torn value).
+      always_bumping_repo = Object.new
+      tick = 0
+      always_bumping_repo.define_singleton_method(:lease_snapshot) do |_folder|
+        tick += 1
+        { idle: true, lease_version: tick }
+      end
+      busy_snap = Hive::InternalPrCheckout.read_only_snapshot(task, lease_repository: always_bumping_repo, max_retries: 2) do |_s|
+        :torn
+      end
+      assert_predicate busy_snap, :busy?
+      assert_nil busy_snap.sampled_value
+    end
+  end
 end

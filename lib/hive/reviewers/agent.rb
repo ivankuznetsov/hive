@@ -137,7 +137,14 @@ module Hive
             break
           end
 
-          result = yield(profile, prompt, configured_timeout, spawn_timeout, attempts)
+          require "hive/review_budget"
+          review_budget = Hive::ReviewBudget.new(task: synthetic_task, project: "")
+          budget_custody = review_budget.capture_custody
+          result = begin
+            yield(profile, prompt, configured_timeout, spawn_timeout, attempts)
+          ensure
+            review_budget.verify_custody!(budget_custody) if budget_custody
+          end
           break if result[:status] == :ok
           break if attempts >= max_attempts
           # A provider usage/credit wall does not clear in seconds: an inline

@@ -35,7 +35,9 @@ module Hive
                      router: Hive::ProviderRouting::Router.new,
                      decision_id_generator: -> { SecureRandom.uuid },
                      context_provenance: Hive::ContextProvenance,
-                     transient_retry_backoff_sec: 60, runtime_digest: nil)
+                     transient_retry_backoff_sec: 60, runtime_digest: nil,
+                     internal_pr_reconciler: nil, task_lease_repository: nil,
+                     admission_failpoint: nil)
         @store = store
         @launcher = launcher
         @limits = DEFAULT_LIMITS.merge(limits)
@@ -51,6 +53,9 @@ module Hive
         @decision_id_generator = decision_id_generator
         @context_provenance = context_provenance
         @transient_retry_backoff_sec = transient_retry_backoff_sec.to_i
+        @internal_pr_reconciler = internal_pr_reconciler
+        @task_lease_repository = task_lease_repository
+        @admission_failpoint = admission_failpoint
         @runtime_digest = runtime_digest || self.class.runtime_source_digest
         unless @runtime_digest.is_a?(String) &&
                @runtime_digest.match?(Record::SHA256_PATTERN)
@@ -74,8 +79,25 @@ module Hive
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
                    admission_view: nil, routing_policy: nil, retry_release: false,
                    subject: nil, replay_semantic_terminal: false,
-                   agent_failure_retry: false)
+                   agent_failure_retry: false, reconcile_mode: nil,
+                   reconcile_deadline: nil, expected_task_generation: nil)
         @launcher.preflight!
+        if task && internal_pr_review_applicable?(task)
+          mode = reconcile_mode || (agent_failure_retry ? :local_verify : :explicit_reopen)
+          expected = expected_task_generation || (generation.is_a?(String) ? generation : nil)
+          return admit_internal_pr_review(
+            task: task, project: project, intended_stage: intended_stage, argv: argv,
+            request_id: request_id, provider: provider, interactive: interactive,
+            inherited_outputs: inherited_outputs, retry_charge: retry_charge,
+            source_attempt: nil, subject: subject, now: now,
+            routing_policy: routing_policy, retry_release: retry_release,
+            replay_semantic_terminal: replay_semantic_terminal,
+            agent_failure_retry: agent_failure_retry,
+            expected_task_generation: expected,
+            reconcile_mode: mode, reconcile_deadline: reconcile_deadline
+          )
+        end
+
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage,
           argv: argv
@@ -97,8 +119,23 @@ module Hive
       def dispatch_recovery(source_attempt:, task:, project:, argv:, request_id:, provider:,
                             inherited_outputs: nil, retry_charge: nil, interactive: false,
                             now: @clock.call, admission_view: nil, routing_policy: nil,
-                            retry_release: false)
+                            retry_release: false, reconcile_mode: :local_verify,
+                            reconcile_deadline: nil)
         @launcher.preflight!
+        if task && internal_pr_review_applicable?(task)
+          return admit_internal_pr_review(
+            task: task, project: project, intended_stage: source_attempt["intended_stage"],
+            argv: argv, request_id: request_id, provider: provider, interactive: interactive,
+            inherited_outputs: inherited_outputs, retry_charge: retry_charge,
+            source_attempt: source_attempt, subject: source_attempt.subject, now: now,
+            routing_policy: routing_policy, retry_release: retry_release,
+            replay_semantic_terminal: false, agent_failure_retry: false,
+            expected_task_generation: nil,
+            reconcile_mode: reconcile_mode || :local_verify,
+            reconcile_deadline: reconcile_deadline
+          )
+        end
+
         generation = Generation.resolve(
           task: task,
           project: project,
@@ -154,9 +191,40 @@ module Hive
       # REPEATED_FAILURE_LIMIT instead of the flat Patrol retry delay.
       def dispatch_request(request, interactive: false, now: @clock.call,
                            admission_view: nil, replay_semantic_terminal: false,
-                           agent_failure_retry: false)
+                           agent_failure_retry: false, reconcile_mode: nil,
+                           reconcile_deadline: nil)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
+        if task && internal_pr_review_applicable?(task)
+          @launcher.preflight!
+          source_attempt = recovery_source_attempt(request)
+          recoverable = recoverable_source_attempt?(source_attempt)
+          mode = reconcile_mode || default_reconcile_mode_for_request(
+            request, agent_failure_retry: agent_failure_retry, task: task
+          )
+          return admit_internal_pr_review(
+            task: task,
+            project: request.project,
+            intended_stage: recoverable ? source_attempt["intended_stage"] : intended_stage,
+            argv: request.argv,
+            request_id: request.request_id,
+            provider: provider_for(task),
+            interactive: interactive,
+            inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
+            retry_charge: recoverable ? recovery_retry_charge(request) : 0,
+            source_attempt: recoverable ? source_attempt : nil,
+            subject: recoverable ? source_attempt.subject : nil,
+            now: now,
+            routing_policy: nil,
+            retry_release: explicit_retry_release?(request, task: task),
+            replay_semantic_terminal: replay_semantic_terminal,
+            agent_failure_retry: agent_failure_retry,
+            expected_task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil,
+            reconcile_mode: mode,
+            reconcile_deadline: reconcile_deadline
+          )
+        end
+
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
           progress_token: command_progress_token(request.argv, task),
@@ -678,15 +746,15 @@ module Hive
         DispatchResult.new(
           status: :existing_live, attempt: record, receipt: nil,
           attach_descriptor: interactive ? attach_descriptor(record) : nil,
-          reason: nil
+          reason: nil, reconciliation: nil
         )
       end
 
-      def accepted_result(record, interactive:, decision: nil)
+      def accepted_result(record, interactive:, decision: nil, reconciliation: nil)
         DispatchResult.new(
           status: :accepted, attempt: record, receipt: nil,
           attach_descriptor: interactive ? attach_descriptor(record) : nil,
-          reason: nil, decision: decision
+          reason: nil, decision: decision, reconciliation: reconciliation
         )
       end
 
@@ -727,10 +795,10 @@ module Hive
         nil
       end
 
-      def deferred_result(reason, attempt: nil, receipt: nil)
+      def deferred_result(reason, attempt: nil, receipt: nil, reconciliation: nil)
         DispatchResult.new(
           status: :deferred, attempt: attempt, receipt: receipt,
-          attach_descriptor: nil, reason: reason
+          attach_descriptor: nil, reason: reason, reconciliation: reconciliation
         )
       end
 
@@ -818,7 +886,7 @@ module Hive
                                     claim_capability:, retry_charge:, inherited_outputs:,
                                     subject:, now:, admission:, starting_revision:,
                                     bookkeeping_started_at:, bookkeeping_deadline:,
-                                    route_decision: nil)
+                                    route_decision: nil, diagnostics: nil)
         admission_retry = bookkeeping_retry(
           "admission", attempt_id: attempt_id,
           deadline: bookkeeping_deadline, started_at: bookkeeping_started_at
@@ -850,6 +918,7 @@ module Hive
             subject: subject,
             source_fingerprint: generation.progress_token,
             admission: admission,
+            diagnostics: diagnostics || {},
             limits: @limits,
             launch_timeout_sec: @launch_timeout_sec,
             now: [ now, @clock.call ].max, timeout_sec: admission_retry.timeout_sec
@@ -898,6 +967,692 @@ module Hive
         Hive::Workflows.for_verb(verb).fetch(:target)
       rescue KeyError, Hive::Error
         "#{task.stage_index}-#{task.stage_name}"
+      end
+
+      def internal_pr_review_applicable?(task)
+        return false unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+        stage = task.respond_to?(:stage_name) ? task.stage_name.to_s : File.basename(File.dirname(task.folder.to_s))
+        return false unless %w[review 6-review].include?(stage)
+
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout.applicable?(task)
+      end
+
+      def default_reconcile_mode_for_request(request, agent_failure_retry:, task: nil)
+        return :local_verify if agent_failure_retry
+        if request.respond_to?(:trigger) &&
+           request.trigger.to_s.start_with?("recovery/admission_failure", "recovery/markerless_failure")
+          return :local_verify
+        end
+        if request.respond_to?(:requestor) &&
+           OPERATOR_RETRY_REQUESTORS.include?(request.requestor.to_s)
+          return :explicit_reopen
+        end
+
+        :local_verify
+      end
+
+      def admit_internal_pr_review(task:, project:, intended_stage:, argv:, request_id:,
+                                   provider:, interactive:, inherited_outputs:, retry_charge:,
+                                   source_attempt:, subject:, now:, routing_policy:,
+                                   retry_release:, replay_semantic_terminal:,
+                                   agent_failure_retry:, expected_task_generation:,
+                                   reconcile_mode:, reconcile_deadline:)
+        # Step 1: Query authoritative attempt store for a live or launching owner
+        # before any lease claim, remote I/O, terminal replay, or recovery selection (U4.1).
+        live = probe_live_owner_for_internal_pr(
+          task: task, project: project, intended_stage: intended_stage,
+          request_id: request_id, subject: subject, source_attempt: source_attempt,
+          expected_task_generation: expected_task_generation, interactive: interactive
+        )
+        return live if live
+
+        @admission_failpoint&.call(:after_live_owner_probe)
+
+        # Step 2 & 3: Conditionally acquire the SQLite task lease only when no
+        # live/launching attempt won the probe-to-claim race (U4.3).
+        handoff_payload = nil
+        early_result = nil
+        fallthrough_not_applicable = false
+
+        begin
+          with_internal_pr_admission_lease(task) do
+            # Defensive re-check inside the lease (covers re-entrant callers).
+            inside_live = probe_live_owner_for_internal_pr(
+              task: task, project: project, intended_stage: intended_stage,
+              request_id: request_id, subject: subject, source_attempt: source_attempt,
+              expected_task_generation: expected_task_generation, interactive: interactive
+            )
+            if inside_live
+              early_result = inside_live
+              next
+            end
+
+            # Step 4a: Recover any verifiable pending intent locally before sampling
+            # projections (U4.6). Unconfirmed pending intents defer locally and
+            # proceed into explicit reopen below when allowed.
+            recovered_rec = nil
+            if internal_pr_pending_present?(task)
+              local_rec = run_internal_pr_reconciler(
+                task, mode: :local_verify, deadline: reconcile_deadline
+              )
+              if local_rec.not_applicable?
+                fallthrough_not_applicable = true
+                next
+              elsif local_rec.busy?
+                early_result = deferred_result(local_rec.reason, reconciliation: local_rec)
+                next
+              elsif local_rec.blocked? &&
+                    !(reconcile_mode == :explicit_reopen && local_rec.reason == "remote_observation_required")
+                early_result = blocked_or_deferred_reconciliation_result(local_rec)
+                next
+              elsif local_rec.proceed?
+                recovered_rec = local_rec
+              end
+            end
+
+            # Step 4b: Compare queued token to the transaction-free generation
+            # BEFORE any remote fetch/checkout (U4.6).
+            if expected_task_generation && !internal_pr_pending_present?(task)
+              pre_gen = try_resolve_internal_pr_generation(
+                task: task, project: project, intended_stage: intended_stage,
+                argv: argv, source_attempt: source_attempt
+              )
+              if pre_gen && pre_gen.task_generation != expected_task_generation.to_s
+                handoff = find_reopen_handoff_attempt(
+                  request_id: request_id, task: task, interactive: interactive
+                )
+                early_result = handoff || DispatchResult.new(
+                  status: :superseded, attempt: nil, receipt: nil,
+                  attach_descriptor: nil, reason: "stale_generation",
+                  reconciliation: recovered_rec
+                )
+                next
+              end
+            end
+
+            # Step 4c: Reconcile under the held SQLite task lease.
+            rec = if recovered_rec && (recovered_rec.reopened? || reconcile_mode == :local_verify)
+              recovered_rec
+            else
+              run_internal_pr_reconciler(
+                task, mode: reconcile_mode, deadline: reconcile_deadline
+              )
+            end
+
+            if rec.not_applicable?
+              fallthrough_not_applicable = true
+              next
+            end
+            if rec.busy?
+              early_result = deferred_result(rec.reason, reconciliation: rec)
+              next
+            end
+            if rec.blocked?
+              early_result = blocked_or_deferred_reconciliation_result(rec)
+              next
+            end
+
+            # Step 4d: Compute post-reconciliation generation and admission lineage.
+            if rec.reopened?
+              effective_source = nil
+              effective_inherited = []
+              effective_retry_charge = 0
+              effective_failed_route_id = nil
+              effective_subject = source_attempt ? nil : subject
+              effective_request_id = if expected_task_generation && rec.checkout_digest
+                reopen_request_id(request_id, rec.checkout_digest)
+              else
+                request_id
+              end
+              generation = Generation.resolve(
+                task: task, project: project, intended_stage: intended_stage,
+                progress_token: command_progress_token(argv, task)
+              )
+            else
+              effective_source = source_attempt
+              effective_inherited = if effective_source && (inherited_outputs.nil? || inherited_outputs.empty?)
+                (effective_source["inherited_outputs"] + effective_source["current_outputs"]).uniq
+              else
+                inherited_outputs || []
+              end
+              effective_retry_charge = if effective_source && retry_charge.nil?
+                effective_source["retry_charge"]
+              else
+                retry_charge.to_i
+              end
+              effective_failed_route_id = effective_source ? failed_route_id_for(effective_source) : nil
+              effective_subject = subject
+              effective_request_id = request_id
+              generation = resolve_internal_pr_generation(
+                task: task, project: project, intended_stage: intended_stage,
+                argv: argv, source_attempt: effective_source
+              )
+              if expected_task_generation && generation.task_generation != expected_task_generation.to_s
+                early_result = DispatchResult.new(
+                  status: :superseded, attempt: nil, receipt: nil,
+                  attach_descriptor: nil, reason: "stale_generation",
+                  reconciliation: rec
+                )
+                next
+              end
+            end
+
+            @admission_failpoint&.call(:after_reconcile_before_insert, rec)
+
+            recovery_source_id = if effective_source && effective_source.state == "lost"
+              effective_source.attempt_id
+            end
+            policy = routing_policy || resolve_routing_policy(task, intended_stage)
+
+            selection = select_and_persist_internal_pr_attempt(
+              task: task, generation: generation, argv: argv,
+              request_id: effective_request_id, provider: provider,
+              interactive: interactive, inherited_outputs: effective_inherited,
+              retry_charge: effective_retry_charge,
+              recovery_source_attempt_id: recovery_source_id,
+              subject: effective_subject, now: now, routing_policy: policy,
+              retry_release: retry_release,
+              replay_semantic_terminal: replay_semantic_terminal,
+              failed_route_id: effective_failed_route_id,
+              agent_failure_retry: agent_failure_retry,
+              reconciliation: rec
+            )
+            if selection[:result]
+              early_result = selection[:result]
+            else
+              handoff_payload = selection
+            end
+          end
+        rescue Hive::RuntimeControlPlane::TaskLeaseRepository::LeaseConditionFailed
+          live_after = probe_live_owner_for_internal_pr(
+            task: task, project: project, intended_stage: intended_stage,
+            request_id: request_id, subject: subject, source_attempt: source_attempt,
+            expected_task_generation: expected_task_generation, interactive: interactive
+          )
+          return live_after || deferred_result("in_flight")
+        rescue Hive::ConcurrentRunError
+          return deferred_result("task_locked", reconciliation: busy_task_locked_result(task))
+        end
+
+        if fallthrough_not_applicable
+          generation = Generation.resolve(
+            task: task, project: project, intended_stage: intended_stage,
+            progress_token: command_progress_token(argv, task),
+            task_generation: expected_task_generation
+          )
+          policy = routing_policy || resolve_routing_policy(task, intended_stage)
+          return admit(
+            task: task, generation: generation, argv: argv, request_id: request_id,
+            provider: provider, interactive: interactive,
+            inherited_outputs: inherited_outputs || [], retry_charge: retry_charge.to_i,
+            recovery_source_attempt_id: source_attempt&.state == "lost" ? source_attempt.attempt_id : nil,
+            subject: subject, now: now, admission_view: nil, routing_policy: policy,
+            retry_release: retry_release, replay_semantic_terminal: replay_semantic_terminal,
+            failed_route_id: source_attempt ? failed_route_id_for(source_attempt) : nil,
+            agent_failure_retry: agent_failure_retry
+          )
+        end
+
+        return early_result if early_result
+
+        # Step 5: Task lease is now released; complete durable launcher handoff (U4.3).
+        complete_launched_handoff(
+          task: task,
+          created: handoff_payload.fetch(:created),
+          generation: handoff_payload.fetch(:generation),
+          claim_capability: handoff_payload.fetch(:claim_capability),
+          route_decision: handoff_payload.fetch(:route_decision),
+          bookkeeping_started_at: handoff_payload.fetch(:bookkeeping_started_at),
+          bookkeeping_deadline: handoff_payload.fetch(:bookkeeping_deadline),
+          interactive: interactive,
+          now: now,
+          reconciliation: handoff_payload.fetch(:reconciliation)
+        )
+      end
+
+      def select_and_persist_internal_pr_attempt(task:, generation:, argv:, request_id:, provider:,
+                                                 interactive:, inherited_outputs:, retry_charge:,
+                                                 recovery_source_attempt_id:, now:, subject:,
+                                                 routing_policy:, retry_release:,
+                                                 replay_semantic_terminal:, failed_route_id:,
+                                                 agent_failure_retry:, reconciliation:)
+        bookkeeping_retry("observe_source").run do |timeout|
+          @store.observe_task_source(
+            task: task, generation: generation, observed_at: [ now, @clock.call ].max,
+            timeout_sec: timeout
+          )
+        end
+        view = bookkeeping_retry("read_admission").run do |timeout|
+          AdmissionView.new(store: @store, records: @store.active_attempts(timeout_sec: timeout))
+        end
+        records = view.records
+        semantic_owner = find_semantic_owner(records, generation)
+        if semantic_owner&.live?
+          if semantic_owner.task_generation == generation.task_generation
+            return { result: live_result(semantic_owner, interactive: interactive) }
+          end
+          return { result: deferred_result("in_flight", attempt: semantic_owner) }
+        end
+
+        exact = records.select { |record| record.task_generation == generation.task_generation }
+        request_attempt = view.request_attempt(request_id: request_id)
+        if request_attempt&.live?
+          return { result: live_result(request_attempt, interactive: interactive) }
+        elsif request_attempt&.state == "terminal"
+          return {
+            result: DispatchResult.new(
+              status: :terminal_replay, attempt: request_attempt,
+              receipt: request_attempt.receipt, attach_descriptor: nil,
+              reason: nil, reconciliation: reconciliation
+            )
+          }
+        elsif request_attempt&.state == "lost"
+          return { result: deferred_result("attempt_lost", attempt: request_attempt, reconciliation: reconciliation) }
+        end
+
+        terminal = unless recovery_source_attempt_id
+          replayable_terminal(
+            exact, request_id, task: task, admission_view: view,
+            generation: generation, subject: subject,
+            replay_semantic_terminal: replay_semantic_terminal
+          )
+        end
+        if terminal
+          return {
+            result: DispatchResult.new(
+              status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
+              attach_descriptor: nil, reason: nil, reconciliation: reconciliation
+            )
+          }
+        end
+
+        transient = transient_retry_terminal(
+          admission_view: view, generation: generation,
+          subject: subject || task_subject(generation), now: now
+        )
+        if transient
+          return {
+            result: deferred_result(
+              "transient_retry", attempt: transient, receipt: transient.receipt,
+              reconciliation: reconciliation
+            )
+          }
+        end
+
+        lost = unresolved_lost_attempt(
+          admission_view: view, generation: generation, subject: subject
+        )
+        if recovery_source_attempt_id.nil? && lost
+          return { result: deferred_result("attempt_lost", attempt: lost, reconciliation: reconciliation) }
+        end
+
+        snapshot = view.capacity(now: now)
+        utc_date = now.utc.to_date
+        if snapshot.at_limit?(
+          project: generation.project, task_slug: generation.task_slug, date: utc_date,
+          max_global: @limits.fetch(:max_global),
+          max_per_project: @limits.fetch(:max_per_project),
+          max_daily: @limits.fetch(:max_daily)
+        )
+          return { result: deferred_result("capacity", reconciliation: reconciliation) }
+        end
+
+        if task && !interactive && !retry_release &&
+           (agent_failure_retry ||
+            ("#{task.stage_index}-#{task.stage_name}" != generation.intended_stage ||
+             CommandProgress.failure_ladder?(argv)))
+          ladder_subject = subject || task_subject(generation)
+          previous = view.latest_terminal_attempt(
+            task_generation: generation.task_generation, subject: ladder_subject
+          )
+          if previous && FAILED_OUTCOMES.include?(previous.outcome)
+            if agent_failure_retry || CommandProgress.failure_ladder?(argv)
+              limit = repeated_failure_limit(view, generation, ladder_subject, previous)
+              return { result: limit } if limit
+            end
+
+            retry_at = self.class.transition_retry_at(
+              ended_at: previous.receipt.fetch("ended_at"), retry_charge: previous["retry_charge"]
+            )
+            if now.utc < retry_at
+              return {
+                result: deferred_result(
+                  "transition_retry", attempt: previous, receipt: previous.receipt,
+                  reconciliation: reconciliation
+                )
+              }
+            end
+
+            retry_charge = [ retry_charge, previous["retry_charge"].to_i + 1 ].max
+          end
+        end
+
+        route_decision = nil
+        if routing_policy.explicit?
+          route_decision = select_provider_route(
+            policy: routing_policy, snapshot: snapshot, records: records,
+            generation: generation, now: now, failed_route_id: failed_route_id
+          )
+          unless route_decision.selected?
+            return {
+              result: DispatchResult.new(
+                status: route_decision.capacity_saturated? ? :deferred : :no_route,
+                attempt: nil, receipt: nil, attach_descriptor: nil,
+                reason: route_decision.reason, decision: route_decision,
+                reconciliation: reconciliation
+              )
+            }
+          end
+        end
+
+        claim_capability = @capability_generator.call
+        attempt_id = @id_generator.call
+        revision = starting_revision(task) || reconciliation.candidate_oid || reconciliation.head_oid
+        bookkeeping_started_at = @monotonic.call
+        bookkeeping_deadline = bookkeeping_started_at + @bookkeeping_timeout_sec
+        created = persist_launching_attempt(
+          view: view,
+          request_id: request_id,
+          recovery_source_attempt_id: recovery_source_attempt_id,
+          task: task,
+          generation: generation,
+          argv: argv,
+          retry_charge: retry_charge,
+          inherited_outputs: inherited_outputs,
+          subject: subject,
+          now: now,
+          admission: patrol_admission_metadata(task: task),
+          attempt_id: attempt_id,
+          provider: route_decision ? route_decision.adapter : provider.to_s,
+          routing: route_decision ? nil : { "mode" => "legacy" },
+          claim_capability: claim_capability,
+          route_decision: route_decision,
+          starting_revision: revision,
+          bookkeeping_started_at: bookkeeping_started_at,
+          bookkeeping_deadline: bookkeeping_deadline,
+          diagnostics: diagnostics_for_reconciliation(reconciliation)
+        )
+
+        if created.attempt_id != attempt_id || created.wrapper || created.state != "launching"
+          adopted = result_for_adopted_handoff(created, interactive: interactive)
+          return {
+            result: adopted || deferred_result("request_already_admitted", attempt: created, reconciliation: reconciliation)
+          }
+        end
+
+        {
+          created: created,
+          generation: generation,
+          claim_capability: claim_capability,
+          route_decision: route_decision,
+          bookkeeping_started_at: bookkeeping_started_at,
+          bookkeeping_deadline: bookkeeping_deadline,
+          reconciliation: reconciliation
+        }
+      rescue CapacityExceeded
+        { result: deferred_result("capacity", reconciliation: reconciliation) }
+      end
+
+      def complete_launched_handoff(task:, created:, generation:, claim_capability:, route_decision:,
+                                    bookkeeping_started_at:, bookkeeping_deadline:, interactive:,
+                                    now:, reconciliation:)
+        @admission_failpoint&.call(:before_launcher_handoff, created)
+        record_attempt_admission(task, created, now)
+        capture_launch_context(task, created, generation, now)
+        handoff_now = [ now.utc, @clock.call.utc ].max
+        created = bookkeeping_retry(
+          "arm_handoff", attempt_id: created.attempt_id,
+          deadline: bookkeeping_deadline, started_at: bookkeeping_started_at
+        ).run do |timeout|
+          @store.arm_launch_handoff(
+            created, launch_timeout_sec: @launch_timeout_sec, now: [ handoff_now, @clock.call.utc ].max,
+            timeout_sec: timeout
+          )
+        end
+        handoff = BookkeepingRetry.with_launch_deadline(bookkeeping_deadline) do
+          @launcher.launch(created, claim_capability: claim_capability)
+        end
+        if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
+          return accepted_result(
+            created, interactive: interactive, decision: route_decision,
+            reconciliation: reconciliation
+          )
+        end
+
+        resolve_failed_handoff(
+          created, interactive: interactive,
+          error: handoff.is_a?(Hash) ? handoff["error"] : nil
+        )
+      rescue BookkeepingBusy => busy
+        if created && !created.final?
+          @store.pending_bookkeeping.record_busy(created, operation: busy.operation, reason: busy.reason)
+        end
+        raise
+      rescue StandardError => e
+        raise unless created
+
+        resolve_failed_handoff(
+          created, interactive: interactive, error: "#{e.class}: #{e.message}"
+        )
+      end
+
+      def probe_live_owner_for_internal_pr(task:, project:, intended_stage:, request_id:,
+                                           subject:, source_attempt:, expected_task_generation:,
+                                           interactive:)
+        view = bookkeeping_retry("read_admission").run do |timeout|
+          AdmissionView.new(store: @store, records: @store.active_attempts(timeout_sec: timeout))
+        end
+        task_id = task.respond_to?(:id) ? task.id : nil
+        slug = task.slug.to_s
+        candidates = view.records.select do |record|
+          next false unless record.live?
+          if subject
+            next record.subject == subject
+          end
+
+          same_task = if task_id.nil?
+            record["project"] == project.to_s && record["task_slug"] == slug
+          else
+            record["task_id"].to_s == task_id.to_s
+          end
+          same_task && record["intended_stage"] == intended_stage.to_s
+        end
+        semantic_owner = candidates.max_by { |record| [ record["accepted_at"], record.lease_version ] }
+
+        if semantic_owner&.live?
+          if expected_task_generation
+            handoff_prefix = "#{request_id}:reopen:"
+            if semantic_owner.task_generation == expected_task_generation.to_s ||
+               semantic_owner["request_id"].to_s.start_with?(handoff_prefix)
+              return live_result(semantic_owner, interactive: interactive)
+            end
+            return deferred_result("in_flight", attempt: semantic_owner)
+          end
+
+          if source_attempt && semantic_owner.task_generation != source_attempt.task_generation
+            return deferred_result("in_flight", attempt: semantic_owner)
+          end
+
+          return live_result(semantic_owner, interactive: interactive)
+        end
+
+        request_attempt = view.request_attempt(request_id: request_id)
+        return live_result(request_attempt, interactive: interactive) if request_attempt&.live?
+
+        nil
+      end
+
+      def with_internal_pr_admission_lease(task)
+        require "hive/lock"
+        repo = resolved_task_lease_repository
+        lock_key = repo.lease_key(task.folder)
+        held = (Thread.current[:hive_task_locks] ||= {})
+        if held.dig(lock_key, :pid) == Process.pid
+          entry = held.fetch(lock_key)
+          entry[:depth] += 1
+          begin
+            return yield
+          ensure
+            entry[:depth] -= 1
+          end
+        end
+
+        held.delete(lock_key)
+        claim_if = lambda do |db, subject_row|
+          db[:attempts].where(
+            task_id: subject_row.fetch(:task_id),
+            state: %w[launching running]
+          ).empty?
+        end
+        payload = Hive::Lock.base_payload.merge("stage" => "review_reconcile_admission")
+        lock_data = repo.acquire(task.folder, payload, create: false, claim_if: claim_if)
+        held[lock_key] = { depth: 1, lock_id: lock_data.fetch("lock_id"), pid: Process.pid }
+        begin
+          yield
+        ensure
+          entry = held.fetch(lock_key)
+          entry[:depth] -= 1
+          if entry[:depth].zero?
+            held.delete(lock_key)
+            repo.release(task.folder, lock_id: entry.fetch(:lock_id))
+          end
+        end
+      end
+
+      def resolved_task_lease_repository
+        return @task_lease_repository if @task_lease_repository
+
+        default_repo = Hive::Lock.task_lease_repository
+        if @store.respond_to?(:database) && @store.database &&
+           @store.database.path != default_repo.database.path
+          return Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+            database: @store.database,
+            clock: @clock,
+            process_start_time: Hive::Lock.method(:process_start_time),
+            process_alive: Hive::Lock.method(:process_identity_alive?)
+          )
+        end
+
+        default_repo
+      end
+
+      def internal_pr_pending_present?(task)
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout::Store.new(task.folder).pending_present?
+      end
+
+      def run_internal_pr_reconciler(task, mode:, deadline:)
+        require "hive/internal_pr_checkout"
+        if @internal_pr_reconciler
+          @internal_pr_reconciler.call(
+            task: task, mode: mode, deadline: deadline, lock_held: true
+          )
+        else
+          Hive::InternalPrCheckout.reconcile(
+            task: task, mode: mode, deadline: deadline, lock_held: true
+          )
+        end
+      end
+
+      def resolve_internal_pr_generation(task:, project:, intended_stage:, argv:, source_attempt:)
+        if source_attempt
+          Generation.resolve(
+            task: task,
+            project: project,
+            intended_stage: intended_stage,
+            progress_token: Generation.artifact_token(task),
+            task_input_epoch: source_attempt.task_input_epoch
+          )
+        else
+          Generation.resolve(
+            task: task,
+            project: project,
+            intended_stage: intended_stage,
+            progress_token: command_progress_token(argv, task)
+          )
+        end
+      end
+
+      def try_resolve_internal_pr_generation(task:, project:, intended_stage:, argv:, source_attempt:)
+        resolve_internal_pr_generation(
+          task: task, project: project, intended_stage: intended_stage,
+          argv: argv, source_attempt: source_attempt
+        )
+      rescue Hive::InternalPrCheckout::Error
+        nil
+      end
+
+      def find_reopen_handoff_attempt(request_id:, task:, interactive:)
+        require "hive/internal_pr_checkout"
+        store = Hive::InternalPrCheckout::Store.new(task.folder)
+        return nil unless store.current_present?
+
+        current = store.read_current
+        digest = current["head_transition_digest"]
+        return nil unless digest
+
+        attempt_id = @store.attempt_id_for_request(request_id: reopen_request_id(request_id, digest))
+        return nil unless attempt_id
+
+        record = @store.fetch(attempt_id)
+        return nil unless record
+        return live_result(record, interactive: interactive) if record.live?
+        if record.state == "terminal"
+          return DispatchResult.new(
+            status: :terminal_replay, attempt: record, receipt: record.receipt,
+            attach_descriptor: nil, reason: nil
+          )
+        end
+        return deferred_result("attempt_lost", attempt: record) if record.state == "lost"
+
+        nil
+      rescue Hive::InternalPrCheckout::Error
+        nil
+      end
+
+      def reopen_request_id(request_id, checkout_digest)
+        "#{request_id}:reopen:#{checkout_digest.to_s[0, 16]}"
+      end
+
+      def blocked_or_deferred_reconciliation_result(rec)
+        DispatchResult.new(
+          status: rec.retryable ? :deferred : :blocked,
+          attempt: nil,
+          receipt: nil,
+          attach_descriptor: nil,
+          reason: rec.reason,
+          reconciliation: rec
+        )
+      end
+
+      def busy_task_locked_result(task)
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout::Result.new(
+          status: "busy",
+          reason: "task_locked",
+          retryable: true,
+          task_slug: task.respond_to?(:slug) ? task.slug : nil,
+          task_id: task.respond_to?(:id) ? task.id : nil,
+          guidance: "task lease is currently held by another Hive process; retry after it releases"
+        )
+      end
+
+      def diagnostics_for_reconciliation(rec)
+        return {} unless rec
+
+        diag = {
+          "internal_pr_reconciliation" => {
+            "status" => rec.status,
+            "reason" => rec.reason,
+            "generation" => rec.generation,
+            "head_oid" => rec.head_oid,
+            "checkout_digest" => rec.checkout_digest
+          }
+        }
+        diag["internal_pr_observation"] = rec.pr_observation if rec.pr_observation.is_a?(Hash)
+        diag
       end
     end
   end

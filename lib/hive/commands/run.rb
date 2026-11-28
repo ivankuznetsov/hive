@@ -41,7 +41,9 @@ module Hive
       # only when the runner result carries the corresponding data — currently
       # `cleanup_instructions:` from the terminal `done` stage. See
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
-      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions allowed_outcomes].freeze
+      OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions allowed_outcomes reconciliation].freeze
+
+      attr_reader :internal_pr_reconciliation
 
       # Exact pre-run task-folder snapshot used only for terminal runners.
       # Task coordination lives outside the folder in SQLite, so every entry
@@ -143,7 +145,12 @@ module Hive
           acquire_under_commit_lock: task.hive_state_path
         ) do
           Hive::DependencySnapshot.enforce_admission!(task)
-          Hive::Attempts::Context.current&.validate_generation!(task)
+          if Hive::Attempts::Context.active?
+            Hive::Attempts::Context.current.validate_generation!(task)
+            @internal_pr_reconciliation = Hive::Attempts::Context.current.last_reconciliation
+          else
+            @internal_pr_reconciliation = reconcile_direct_internal_pr!(task)
+          end
           @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
@@ -167,7 +174,9 @@ module Hive
           normalization = nil
           begin
             result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) do
-              raw_result = runner.call(task, cfg)
+              raw_result = with_bound_internal_pr_observation do
+                runner.call(task, cfg)
+              end
               normalization = Hive::TerminalOutcome.normalize(task, raw_result)
               normalization.result
             end
@@ -207,6 +216,42 @@ module Hive
         moved
       end
       private :task_after_patrol_fix_move
+
+      def reconcile_direct_internal_pr!(task)
+        return nil unless %w[review 6-review].include?(task.stage_name.to_s)
+
+        require "hive/internal_pr_checkout"
+        return nil unless Hive::InternalPrCheckout.applicable?(task)
+
+        deadline = Hive::InternalPrCheckout.monotonic_deadline(project_root: task.project_root)
+        result = Hive::InternalPrCheckout.reconcile(
+          task: task, mode: :explicit_reopen, deadline: deadline, lock_held: true
+        )
+        return nil if result.not_applicable?
+        return result if result.proceed?
+
+        require "hive/attempts/contracts"
+        if result.busy? || result.retryable
+          raise Hive::Attempts::ReconciliationBusy.new(
+            "internal PR checkout deferred for #{task.slug} (#{result.reason}): #{result.guidance}",
+            reconciliation: result
+          )
+        end
+
+        raise Hive::Attempts::ReconciliationBlocked.new(
+          "internal PR checkout blocked for #{task.slug} (#{result.reason}): #{result.guidance}",
+          reconciliation: result
+        )
+      end
+
+      def with_bound_internal_pr_observation(&block)
+        obs = @internal_pr_reconciliation&.pr_observation ||
+              Hive::Attempts::Context.current&.pr_observation
+        return yield unless obs
+
+        require "hive/internal_pr_checkout"
+        Hive::InternalPrCheckout.with_pr_observation(obs, &block)
+      end
 
       def resolve_task
         Hive::TaskResolver.new(
@@ -470,6 +515,7 @@ module Hive
           payload["cleanup_instructions"] = result[:cleanup_instructions]
         end
         payload["allowed_outcomes"] = allowed_outcomes(task) if human_decision_required?(task, marker)
+        payload["reconciliation"] = @internal_pr_reconciliation.to_h if @internal_pr_reconciliation
         # The JSON payload is written to stdout *before* the raise. bin/hive
         # rescues Hive::Error and calls `exit(e.exit_code)`; Ruby's normal
         # interpreter shutdown flushes stdout via IO finalizers, so the
@@ -759,6 +805,9 @@ module Hive
       end
 
       def report_text(task, result, marker)
+        if @internal_pr_reconciliation && !Hive::Attempts::Context.active?
+          puts @internal_pr_reconciliation.to_text
+        end
         if result.is_a?(Hash) && result[:cleanup_instructions]
           # terminal `done` stage returns the cleanup lines as data; the human path
           # renders them on stdout while --json embeds them in the envelope.

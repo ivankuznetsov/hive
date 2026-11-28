@@ -729,12 +729,24 @@ module Hive
         end
 
         root = Hive::Worktree.canonical_root(task.project_root)
-        Hive::Worktree.read_owned_pointer(
-          task.folder,
+        pointer_kwargs = {
           project_root: task.project_root,
           slug: task.slug,
           expected_root: root
-        )
+        }
+        if %w[review 6-review].include?(task.stage_name.to_s)
+          require "hive/internal_pr_checkout"
+          if Hive::InternalPrCheckout.applicable?(task)
+            snap = Hive::InternalPrCheckout.read_only_snapshot(task)
+            unless snap.coherent?
+              raise Hive::WorktreeError, "internal PR checkout snapshot is not coherent (#{snap.reason}): #{snap.guidance}"
+            end
+            pointer_kwargs[:expected_root] = snap.identity.expected_root
+            pointer_kwargs[:expected_path] = snap.identity.expected_worktree_path
+            pointer_kwargs[:expected_branch] = snap.identity.expected_branch
+          end
+        end
+        Hive::Worktree.read_owned_pointer(task.folder, **pointer_kwargs)
       rescue Hive::WorktreeError => e
         warn "hive: worktree ownership validation failed: #{e.message}; recreate or move task back to 4-execute"
         exit 1

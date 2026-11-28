@@ -6,6 +6,8 @@ require "hive/runtime_control_plane"
 module Hive
   module RuntimeControlPlane
     class TaskLeaseRepository
+      class LeaseConditionFailed < Hive::ConcurrentRunError; end
+
       MAX_RETRIES = 8
       MAX_PAYLOAD_BYTES = 16 * 1024
       IDENTITY_CONFLICT_ACTION = "give this task folder a fresh unique id in meta.yml " \
@@ -37,7 +39,7 @@ module Hive
         end
       end
 
-      def acquire(task_folder, payload, create: true, observation: nil)
+      def acquire(task_folder, payload, create: true, observation: nil, claim_if: nil)
         folder = File.expand_path(task_folder)
         if create && !observation
           FileUtils.mkdir_p(folder)
@@ -60,7 +62,17 @@ module Hive
           if observed && observed[:holder_id] && holder_alive?(observed)
             raise contention(folder, observed)
           end
-          claimed = claim(subject, observed, data, payload_json)
+          claimed = if claim_if
+            claim(subject, observed, data, payload_json, claim_if: claim_if)
+          else
+            claim(subject, observed, data, payload_json)
+          end
+          if claimed == :condition_failed
+            raise LeaseConditionFailed.new(
+              "task lease claim condition not satisfied for #{folder}",
+              lock_path: "runtime-control-plane:task:#{subject.fetch(:task_id)}"
+            )
+          end
           return claimed if claimed
         end
         raise contention(folder, read_row(subject.fetch(:task_id)))
@@ -116,6 +128,28 @@ module Hive
         row && row[:holder_id] ? payload_from(row) : nil
       rescue IdentityError, Errno::ENOENT
         nil
+      end
+
+      # Read-only idle/version probe for consistent projection bracketing.
+      # Release retains `lease_version` and the next claim increments it, so
+      # matching `{ idle: true, lease_version: v }` on both sides proves no
+      # lease-serialized transition ran during the read.
+      def lease_snapshot(task_folder)
+        return { idle: true, lease_version: 0, holder_id: nil } unless File.file?(@database.path)
+
+        folder = File.expand_path(task_folder.to_s)
+        subject = subject_for(folder)
+        row = read_row(subject.fetch(:task_id))
+        return { idle: true, lease_version: 0, holder_id: nil } unless row
+
+        live = row[:holder_id] && holder_alive?(row)
+        {
+          idle: !live,
+          lease_version: row.fetch(:lease_version),
+          holder_id: live ? row[:holder_id] : nil
+        }
+      rescue IdentityError, Errno::ENOENT
+        { idle: true, lease_version: 0, holder_id: nil }
       end
 
       def active_leases(state_roots:, limit:)
@@ -304,13 +338,18 @@ module Hive
         @database.read { |db| db[:task_leases].where(task_id: task_id).first }
       end
 
-      def claim(subject, observed, data, payload_json)
+      def claim(subject, observed, data, payload_json, claim_if: nil)
         values = {
           holder_id: data.fetch("lock_id"), holder_pid: data.fetch("pid"),
           holder_process_identity: data["process_start_time"], payload_json: payload_json
         }
         claimed = false
+        condition_failed = false
         @database.transaction(operation: "task_lease.claim") do |db|
+          if claim_if && !claim_if.call(db, subject)
+            condition_failed = true
+            next
+          end
           dataset = db[:task_leases].where(task_id: subject.fetch(:task_id))
           if observed
             claimed = dataset.where(
@@ -330,6 +369,8 @@ module Hive
             end
           end
         end
+        return :condition_failed if condition_failed
+
         data if claimed
       end
 

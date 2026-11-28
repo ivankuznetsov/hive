@@ -32,6 +32,11 @@ module Hive
     # such records instead of rolling the log back to the pre-spawn bytes.
     APPEND_ONLY_LOGS = { "task-journal.jsonl" => ".task-journal.lock" }.freeze
     APPEND_ONLY_RECORD_SCHEMA = "hive-task-journal-event".freeze
+    MAX_TREE_DEPTH = 16
+    MAX_TREE_PATH_BYTES = 4_096
+    DIGEST_MODULUS = 1 << 256
+
+    class TreeLimitError < StandardError; end
 
     module_function
 
@@ -112,6 +117,133 @@ module Hive
     # Names that differ between two snapshots produced by #snapshot.
     def diff(before, after)
       before.keys.reject { |k| before[k] == after[k] }
+    end
+
+    # Stream a directory tree without following symlinks, keeping working
+    # memory bounded to the active directory stack (depth <= max_depth).
+    # Returns a frozen Hash with:
+    #   - :present (Boolean)
+    #   - :count (Integer — total entries below root)
+    #   - :membership_digest (SHA-256 over relative path + kind + count)
+    #   - :stat_digest (SHA-256 over relative path + kind + mode/size/dev/ino/nlink/mtime/ctime/target + count)
+    def tree_inventory_digest(root, max_depth: MAX_TREE_DEPTH, max_path_bytes: MAX_TREE_PATH_BYTES)
+      root_path = File.expand_path(root.to_s)
+      root_stat = begin
+        File.lstat(root_path)
+      rescue Errno::ENOENT
+        return {
+          present: false,
+          count: 0,
+          membership_digest: ::Digest::SHA256.hexdigest("hive-tree-missing-v1"),
+          stat_digest: ::Digest::SHA256.hexdigest("hive-tree-missing-v1")
+        }.freeze
+      end
+
+      unless root_stat.directory? && !root_stat.symlink?
+        kind = root_stat.symlink? ? "symlink" : root_stat.ftype
+        target = root_stat.symlink? ? File.readlink(root_path) : ""
+        non_dir = ::Digest::SHA256.hexdigest("hive-tree-non-dir-v1\0#{kind}\0#{root_stat.mode & 0o7777}\0#{target}")
+        return {
+          present: true,
+          non_directory: true,
+          count: 0,
+          membership_digest: non_dir,
+          stat_digest: non_dir
+        }.freeze
+      end
+
+      count = 0
+      mem_sum = 0
+      mem_xor = 0
+      stat_sum = 0
+      stat_xor = 0
+      stack = [ [ root_path, "", 0 ] ]
+
+      until stack.empty?
+        dir_path, rel_prefix, depth = stack.pop
+        raise TreeLimitError, "archive tree depth exceeds #{max_depth}" if depth > max_depth
+
+        Dir.open(dir_path) do |dir|
+          while (name = dir.read)
+            next if name == "." || name == ".."
+
+            relative = rel_prefix.empty? ? name : "#{rel_prefix}/#{name}"
+            if relative.bytesize > max_path_bytes
+              raise TreeLimitError, "archive tree path exceeds #{max_path_bytes} bytes"
+            end
+
+            full = File.join(dir_path, name)
+            entry_stat = File.lstat(full)
+            kind = entry_stat.symlink? ? "symlink" : entry_stat.ftype
+            target = entry_stat.symlink? ? File.readlink(full) : ""
+
+            mem_token = "m\0#{relative}\0#{kind}"
+            mem_h1 = ::Digest::SHA256.digest(mem_token).unpack1("H*").to_i(16)
+            mem_h2 = ::Digest::SHA256.digest("x\0#{mem_token}").unpack1("H*").to_i(16)
+            mem_sum = (mem_sum + mem_h1) % DIGEST_MODULUS
+            mem_xor ^= mem_h2
+
+            stat_token = [
+              "s", relative, kind,
+              (entry_stat.mode & 0o7777).to_s(8),
+              entry_stat.size,
+              entry_stat.dev,
+              entry_stat.ino,
+              entry_stat.nlink,
+              entry_stat.mtime.tv_sec,
+              entry_stat.mtime.tv_nsec,
+              entry_stat.ctime.tv_sec,
+              entry_stat.ctime.tv_nsec,
+              target
+            ].join("\0")
+            stat_h1 = ::Digest::SHA256.digest(stat_token).unpack1("H*").to_i(16)
+            stat_h2 = ::Digest::SHA256.digest("x\0#{stat_token}").unpack1("H*").to_i(16)
+            stat_sum = (stat_sum + stat_h1) % DIGEST_MODULUS
+            stat_xor ^= stat_h2
+            count += 1
+
+            if entry_stat.directory? && !entry_stat.symlink?
+              raise TreeLimitError, "archive tree depth exceeds #{max_depth}" if depth + 1 > max_depth
+
+              stack << [ full, relative, depth + 1 ]
+            end
+          end
+        end
+      end
+
+      {
+        present: true,
+        count: count,
+        membership_digest: ::Digest::SHA256.hexdigest(
+          "hive-tree-membership-v1\0#{count}\0#{mem_sum.to_s(16)}\0#{mem_xor.to_s(16)}"
+        ),
+        stat_digest: ::Digest::SHA256.hexdigest(
+          "hive-tree-stat-v1\0#{count}\0#{stat_sum.to_s(16)}\0#{stat_xor.to_s(16)}"
+        )
+      }.freeze
+    end
+
+    # Compute the exact membership digest for a caller-supplied enumerable of
+    # `[relative_path, kind]` pairs using the same commutative folding formula
+    # as `tree_inventory_digest`, so sealed manifests and live streaming walks
+    # compare equal without loading all entries into memory.
+    def fold_membership_digest(pairs, present: true)
+      return ::Digest::SHA256.hexdigest("hive-tree-missing-v1") unless present
+
+      count = 0
+      mem_sum = 0
+      mem_xor = 0
+      pairs.each do |relative, kind|
+        mem_token = "m\0#{relative}\0#{kind}"
+        mem_h1 = ::Digest::SHA256.digest(mem_token).unpack1("H*").to_i(16)
+        mem_h2 = ::Digest::SHA256.digest("x\0#{mem_token}").unpack1("H*").to_i(16)
+        mem_sum = (mem_sum + mem_h1) % DIGEST_MODULUS
+        mem_xor ^= mem_h2
+        count += 1
+      end
+      ::Digest::SHA256.hexdigest(
+        "hive-tree-membership-v1\0#{count}\0#{mem_sum.to_s(16)}\0#{mem_xor.to_s(16)}"
+      )
     end
 
     def fingerprint(path)

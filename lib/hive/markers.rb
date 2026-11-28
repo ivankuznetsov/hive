@@ -34,6 +34,10 @@ module Hive
     # drift between two of these copies. Add a marker here and every
     # consumer picks it up.
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
+    REVIEW_MARKER_NAMES = %w[
+      REVIEW_WORKING REVIEW_WAITING REVIEW_CI_STALE
+      REVIEW_STALE REVIEW_COMPLETE REVIEW_ERROR
+    ].freeze
 
     INTERNAL_ATTR_KEYS = %w[
       marker_id attempt_id task_generation ownership_generation task_input_epoch
@@ -188,6 +192,54 @@ module Hive
     # markerless crash window first.
     def without_markers(body)
       body.to_s.b.gsub(MARKER_RE, "")
+    end
+
+    # Remove only the explicitly named markers (including shadowed or embedded
+    # occurrences) while preserving MANUAL_STEERING, other unrelated markers,
+    # frontmatter, and operator prose byte for byte.
+    def without_named_markers(body, names)
+      normalized = Array(names).map { |entry| entry.to_s.upcase }.uniq
+      unknown = normalized - KNOWN_NAMES
+      raise ArgumentError, "unknown marker names: #{unknown.join(', ')}" unless unknown.empty?
+      return body.to_s.b if normalized.empty?
+
+      alternation = normalized.map { |entry| Regexp.escape(entry) }.join("|")
+      pattern = /<!--\s*(?:#{alternation})(?=\s|-->)(?:(?!<!--).)*?\s*-->/m
+      binary = body.to_s.b
+      result = +"".b
+      cursor = 0
+      binary.scan(pattern) do
+        match = Regexp.last_match
+        start_pos = match.begin(0)
+        end_pos = match.end(0)
+        result << binary.byteslice(cursor, start_pos - cursor)
+        # Drop a single trailing LF only when the marker occupied its own line.
+        preceded_by_bol = start_pos.zero? || binary.getbyte(start_pos - 1) == 10
+        if preceded_by_bol && binary.getbyte(end_pos) == 10
+          end_pos += 1
+        end
+        cursor = end_pos
+      end
+      result << binary.byteslice(cursor..)
+      result
+    end
+
+    def remove_named_markers(state_file_path, names, refuse_if_current: nil)
+      with_markers_lock(state_file_path) do
+        if refuse_if_current
+          refused = Array(refuse_if_current).map { |entry| entry.to_s.downcase.to_sym }
+          return :refused if refused.include?(current(state_file_path).name)
+        end
+
+        body = read_regular_body(state_file_path)
+        return :missing unless body
+
+        cleaned = without_named_markers(body, names)
+        return :unchanged if cleaned == body
+
+        write_atomic(state_file_path, cleaned)
+        :removed
+      end
     end
 
     # Serialize concurrent state-file writers via a sidecar `.markers-lock`

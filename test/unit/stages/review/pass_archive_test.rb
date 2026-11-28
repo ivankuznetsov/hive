@@ -133,4 +133,46 @@ class ReviewPassArchiveTest < Minitest::Test
       end
     end
   end
+
+  def test_exact_label_retire_resumes_across_empty_dir_partial_moves_and_empty_pass_and_refuses_conflict
+    with_tmp_dir do |folder|
+      task = Struct.new(:folder, :project_name).new(folder, "proj")
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      receipt = { "transaction_id" => "tx-exact-1", "from" => "a" * 40, "to" => "b" * 40 }
+      label = "internal-pr-reopen-bbbbbbbbbbbb-tx1"
+
+      # 1. Empty pass still creates reserved directory and reuses it on replay.
+      rel1 = Archive.retire!(task, label: label, expiry_reason: "internal_pr_head_changed", receipt: receipt, exact_label: true)
+      assert_equal "reviews/archive/#{label}", rel1
+      assert File.file?(File.join(folder, rel1, Archive::RETIREMENT_RECEIPT))
+      rel2 = Archive.retire!(task, label: label, expiry_reason: "internal_pr_head_changed", receipt: receipt, exact_label: true)
+      assert_equal rel1, rel2
+      assert_equal 2, Archive.generation(folder)
+
+      # 2. Conflicting receipt on same exact label fails closed.
+      assert_raises(Archive::ConflictingArchiveError) do
+        Archive.retire!(task, label: label, expiry_reason: "internal_pr_head_changed",
+                              receipt: receipt.merge("transaction_id" => "tx-other"), exact_label: true)
+      end
+
+      # 3. Empty reserved dir created before retirement.json resumes cleanly.
+      label2 = "internal-pr-reopen-cccccccccccc-tx2"
+      receipt2 = { "transaction_id" => "tx-exact-2", "from" => "b" * 40, "to" => "c" * 40 }
+      FileUtils.mkdir_p(File.join(folder, "reviews", "archive", label2))
+      write(folder, "reviews/claude-01.md", "pass 1\n")
+      rel3 = Archive.retire!(task, label: label2, expiry_reason: "internal_pr_head_changed",
+                                   receipt: receipt2, exact_label: true, prior_labels: [ label ])
+      assert_equal "reviews/archive/#{label2}", rel3
+      assert File.file?(File.join(folder, rel3, "claude-01.md"))
+      assert File.file?(File.join(folder, rel3, Archive::RETIREMENT_RECEIPT))
+
+      # 4. Non-empty dir without retirement.json refuses as conflicting.
+      label3 = "internal-pr-reopen-dddddddddddd-tx3"
+      write(folder, "reviews/archive/#{label3}/stray.md", "conflict\n")
+      assert_raises(Archive::ConflictingArchiveError) do
+        Archive.retire!(task, label: label3, expiry_reason: "internal_pr_head_changed",
+                              receipt: { "transaction_id" => "tx-exact-3" }, exact_label: true)
+      end
+    end
+  end
 end

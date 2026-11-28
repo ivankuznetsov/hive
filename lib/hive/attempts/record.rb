@@ -116,7 +116,8 @@ module Hive
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
                          launch_timeout_sec:, ownership_generation: nil,
-                         task_input_epoch: 0, subject: nil, routing: { "mode" => "legacy" })
+                         task_input_epoch: 0, subject: nil, routing: { "mode" => "legacy" },
+                         diagnostics: {})
         timestamp = iso8601(now)
         subject ||= task_stage_subject(
           task_id: task_id, task_slug: task_slug, intended_stage: intended_stage
@@ -161,7 +162,7 @@ module Hive
           "current_outputs" => [],
           "receipt" => nil,
           "loss" => nil,
-          "diagnostics" => {}
+          "diagnostics" => diagnostics.is_a?(Hash) ? Hive::StringifyKeys.call(diagnostics) : {}
         )
       end
 

@@ -23,9 +23,25 @@ module Hive
     class InvalidRequest < Error; end
     class UnsupportedOperation < InvalidRequest; end
     class CommandFailed < Error; end
+    class DeadlineExceeded < CommandFailed; end
     class RemoteConflict < Error; end
     class MaterializationFailed < Error; end
     class PublicationFailed < Error; end
+    class CheckoutRefused < Error
+      REASONS = %i[
+        ignored_obstruction dirty_worktree branch_moved local_head_moved
+        command_failed
+      ].freeze
+
+      attr_reader :reason
+
+      def initialize(reason, message)
+        raise ArgumentError, "unknown checkout refusal #{reason.inspect}" unless REASONS.include?(reason)
+
+        @reason = reason
+        super(message)
+      end
+    end
     # A local fast-forward precondition does not hold. `reason` is a stable
     # symbol so callers can name the exact operator action.
     class FastForwardRefused < Error
@@ -231,6 +247,82 @@ module Hive
       end
     end
 
+    PullRequestObservation = Data.define(
+      :remote_fingerprint, :pr_number, :ref, :oid
+    ) do
+      def initialize(remote_fingerprint:, pr_number:, ref:, oid:)
+        fingerprint = remote_fingerprint.to_s.downcase
+        unless fingerprint.match?(/\A[0-9a-f]{64}\z/)
+          raise InvalidRequest, "pull request observation fingerprint is invalid"
+        end
+
+        number = Integer(pr_number)
+        raise InvalidRequest, "pull request number must be positive" unless number.positive?
+
+        expected_ref = "refs/pull/#{number}/head"
+        unless ref.to_s == expected_ref
+          raise InvalidRequest, "pull request observation ref does not match its PR number"
+        end
+
+        normalized_oid = oid&.to_s&.downcase
+        if normalized_oid && !normalized_oid.match?(OID)
+          raise InvalidRequest, "pull request observation OID is invalid"
+        end
+
+        super(
+          remote_fingerprint: fingerprint.dup.freeze,
+          pr_number: number,
+          ref: expected_ref.freeze,
+          oid: normalized_oid&.dup&.freeze
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidRequest, "pull request observation is invalid"
+      end
+
+      def present?
+        !oid.nil?
+      end
+    end
+
+    QuarantineFetchReceipt = Data.define(
+      :remote_fingerprint, :pr_number, :ref, :quarantine_ref, :oid
+    ) do
+      def initialize(remote_fingerprint:, pr_number:, ref:, quarantine_ref:, oid:)
+        fingerprint = remote_fingerprint.to_s.downcase
+        unless fingerprint.match?(/\A[0-9a-f]{64}\z/)
+          raise InvalidRequest, "quarantine fetch receipt fingerprint is invalid"
+        end
+
+        number = Integer(pr_number)
+        raise InvalidRequest, "pull request number must be positive" unless number.positive?
+
+        expected_ref = "refs/pull/#{number}/head"
+        unless ref.to_s == expected_ref
+          raise InvalidRequest, "quarantine fetch receipt ref does not match its PR number"
+        end
+
+        qref = quarantine_ref.to_s
+        unless qref.start_with?("refs/hive/internal-pr-checkout/")
+          raise InvalidRequest, "quarantine ref is outside the internal-pr-checkout namespace"
+        end
+
+        normalized_oid = oid.to_s.downcase
+        unless normalized_oid.match?(OID)
+          raise InvalidRequest, "quarantine fetch receipt OID is invalid"
+        end
+
+        super(
+          remote_fingerprint: fingerprint.dup.freeze,
+          pr_number: number,
+          ref: expected_ref.freeze,
+          quarantine_ref: qref.dup.freeze,
+          oid: normalized_oid.dup.freeze
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidRequest, "quarantine fetch receipt is invalid"
+      end
+    end
+
     module_function
 
     # Execute one closed, read-only Git operation. Callers receive process
@@ -297,7 +389,7 @@ module Hive
     end
 
     def observe_remote_branch(repository_path:, branch:, remote: "origin",
-                              allow_local_transport: false)
+                              allow_local_transport: false, timeout_sec: nil, deadline: nil)
       name = branch_name(branch)
       target = resolve_remote_target(
         repository_path, remote, push: false,
@@ -305,8 +397,348 @@ module Hive
       )
       observe_resolved_remote(
         repository_path, target, name,
+        allow_local_transport: allow_local_transport,
+        timeout_sec: effective_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      )
+    end
+
+    def verify_repository_config!(repository_path)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      true
+    end
+
+    def remote_target_fingerprint(repository_path:, remote: "origin", push: false,
+                                  allow_local_transport: false)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      target = resolve_remote_target(
+        repository, remote, push: push,
         allow_local_transport: allow_local_transport
       )
+      immutable(remote_fingerprint(target))
+    end
+
+    def observe_pull_request_head(repository_path:, pr_number:, remote: "origin",
+                                  expected_remote_fingerprint: nil,
+                                  allow_local_transport: false,
+                                  timeout_sec: nil, deadline: nil)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      number = positive_pr_number(pr_number)
+      target = resolve_remote_target(
+        repository, remote, push: false,
+        allow_local_transport: allow_local_transport
+      )
+      fingerprint = remote_fingerprint(target)
+      if expected_remote_fingerprint &&
+         fingerprint != expected_remote_fingerprint.to_s.downcase
+        raise RemoteConflict, "remote target changed after observation"
+      end
+
+      observe_resolved_pull_request(
+        repository, target, number, fingerprint,
+        allow_local_transport: allow_local_transport,
+        timeout_sec: effective_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      )
+    end
+
+    # Fetch one exact pull-request head commit without side effects on tags,
+    # ordinary tracking refs, or FETCH_HEAD, then install the caller's
+    # transaction-scoped quarantine ref strictly from absence at that exact OID.
+    def fetch_pull_request_commit(repository_path:, pr_number:, expected_oid:,
+                                  quarantine_ref:, remote: "origin",
+                                  expected_remote_fingerprint: nil,
+                                  allow_local_transport: false,
+                                  timeout_sec: nil, deadline: nil)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      number = positive_pr_number(pr_number)
+      expected = exact_oid(expected_oid, label: "expected PR head OID")
+      qref = validated_internal_pr_ref(quarantine_ref, label: "quarantine ref")
+
+      if read(repository, :ref_oid, ref: qref).success?
+        raise RemoteConflict, "quarantine ref already exists"
+      end
+
+      target = resolve_remote_target(
+        repository, remote, push: false,
+        allow_local_transport: allow_local_transport
+      )
+      fingerprint = remote_fingerprint(target)
+      if expected_remote_fingerprint &&
+         fingerprint != expected_remote_fingerprint.to_s.downcase
+        raise RemoteConflict, "remote target changed after observation"
+      end
+
+      before = observe_resolved_pull_request(
+        repository, target, number, fingerprint,
+        allow_local_transport: allow_local_transport,
+        timeout_sec: effective_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      )
+      unless before.present? && before.oid == expected
+        raise RemoteConflict, "remote pull request head changed before exact fetch"
+      end
+
+      pr_ref = "refs/pull/#{number}/head"
+      _out, err, status, _overflow = capture(
+        repository,
+        [ "fetch", "--no-tags", "--no-write-fetch-head", target, pr_ref ],
+        allow_local_transport: allow_local_transport,
+        timeout_sec: effective_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      )
+      unless status.success?
+        if err.include?("managed Git command timed out")
+          raise DeadlineExceeded, "pull request fetch timed out"
+        end
+        raise CommandFailed, "observed pull request commit could not be fetched"
+      end
+
+      after = observe_resolved_pull_request(
+        repository, target, number, fingerprint,
+        allow_local_transport: allow_local_transport,
+        timeout_sec: effective_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      )
+      unless after.present? && after.oid == expected
+        raise RemoteConflict, "remote pull request head changed during exact fetch"
+      end
+
+      commit = read(repository, :commit_oid, oid: expected)
+      unless commit.success? && commit.stdout.strip.downcase == expected
+        raise RemoteConflict, "fetched pull request commit does not match expected OID"
+      end
+
+      zero = "0" * expected.length
+      command!(
+        repository, "update-ref", qref, expected, zero,
+        error_class: RemoteConflict,
+        message: "quarantine ref could not be installed from absence"
+      )
+      installed = read(repository, :ref_oid, ref: qref)
+      unless installed.success? && installed.stdout.strip.downcase == expected
+        raise RemoteConflict, "quarantine ref installation could not be verified"
+      end
+
+      QuarantineFetchReceipt.new(
+        remote_fingerprint: immutable(fingerprint),
+        pr_number: number,
+        ref: immutable(pr_ref),
+        quarantine_ref: immutable(qref),
+        oid: immutable(expected)
+      )
+    end
+
+    def ensure_immutable_ref(repository_path:, ref:, oid:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      target_ref = validated_internal_pr_ref(ref, label: "immutable archive ref")
+      expected = exact_oid(oid, label: "immutable archive OID")
+      commit = read(repository, :commit_oid, oid: expected)
+      unless commit.success? && commit.stdout.strip.downcase == expected
+        raise CommandFailed, "immutable archive commit is unavailable"
+      end
+
+      existing = read(repository, :ref_oid, ref: target_ref)
+      if existing.success?
+        current = existing.stdout.strip.downcase
+        return :existing if current == expected
+
+        raise RemoteConflict, "immutable archive ref already points to a different commit"
+      end
+
+      zero = "0" * expected.length
+      command!(
+        repository, "update-ref", target_ref, expected, zero,
+        error_class: RemoteConflict,
+        message: "immutable archive ref could not be installed from absence"
+      )
+      :created
+    end
+
+    def delete_ref_if_matches(repository_path:, ref:, expected_oid:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      target_ref = validated_owned_deletable_ref(ref)
+      expected = exact_oid(expected_oid, label: "expected ref OID")
+      existing = read(repository, :ref_oid, ref: target_ref)
+      return :absent unless existing.success?
+
+      current = existing.stdout.strip.downcase
+      unless current == expected
+        raise RemoteConflict, "ref no longer matches expected OID"
+      end
+
+      command!(
+        repository, "update-ref", "-d", target_ref, expected,
+        error_class: RemoteConflict,
+        message: "ref could not be removed at expected OID"
+      )
+      :deleted
+    end
+
+    def update_branch_ref(repository_path:, branch:, new_oid:, expected_old_oid:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      name = branch_name(branch)
+      target = exact_oid(new_oid, label: "new branch OID")
+      expected_old = exact_oid(expected_old_oid, label: "expected old branch OID")
+      commit = read(repository, :commit_oid, oid: target)
+      unless commit.success? && commit.stdout.strip.downcase == target
+        raise CommandFailed, "target branch commit is unavailable"
+      end
+
+      command!(
+        repository, "update-ref", "refs/heads/#{name}", target, expected_old,
+        error_class: RemoteConflict,
+        message: "owned branch ref moved before expected-OID update"
+      )
+      verified = read(repository, :branch_oid, branch: name)
+      unless verified.success? && verified.stdout.strip.downcase == target
+        raise CommandFailed, "owned branch ref update could not be verified"
+      end
+
+      immutable(target)
+    end
+
+    def checkout_detached_preserving_ignored(repository_path:, oid:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      expected = exact_oid(oid, label: "checkout OID")
+      commit = read(repository, :commit_oid, oid: expected)
+      unless commit.success? && commit.stdout.strip.downcase == expected
+        raise CheckoutRefused.new(:command_failed, "checkout target commit is unavailable")
+      end
+
+      _out, err, status, _overflow = capture(
+        repository, [ "checkout", "--no-overwrite-ignore", "--detach", expected ]
+      )
+      unless status.success?
+        if err.match?(/untracked working tree files would be overwritten|Updating the following directories would lose untracked files/i)
+          raise CheckoutRefused.new(
+            :ignored_obstruction,
+            "checkout refused to overwrite untracked or ignored local files"
+          )
+        end
+        if err.match?(/local changes.*would be overwritten/i)
+          raise CheckoutRefused.new(
+            :dirty_worktree,
+            "checkout refused because local tracked changes would be overwritten"
+          )
+        end
+        raise CheckoutRefused.new(:command_failed, "exact detached checkout failed")
+      end
+
+      head = read(repository, :head_oid)
+      unless head.success? && head.stdout.strip.downcase == expected
+        raise CheckoutRefused.new(:command_failed, "detached checkout HEAD could not be verified")
+      end
+      immutable(expected)
+    end
+
+    def attach_branch_head(repository_path:, branch:, expected_oid:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      name = branch_name(branch)
+      expected = exact_oid(expected_oid, label: "expected branch OID")
+      branch_tip = read(repository, :branch_oid, branch: name)
+      unless branch_tip.success? && branch_tip.stdout.strip.downcase == expected
+        raise RemoteConflict, "owned branch ref does not match expected commit before attach"
+      end
+      head = read(repository, :head_oid)
+      unless head.success? && head.stdout.strip.downcase == expected
+        raise RemoteConflict, "worktree HEAD does not match expected commit before attach"
+      end
+
+      command!(
+        repository, "symbolic-ref", "HEAD", "refs/heads/#{name}",
+        error_class: CommandFailed,
+        message: "owned branch HEAD attach failed"
+      )
+      current = read(repository, :current_branch)
+      final_head = read(repository, :head_oid)
+      unless current.success? && current.stdout.strip == name &&
+             final_head.success? && final_head.stdout.strip.downcase == expected
+        raise CommandFailed, "owned branch HEAD attach could not be verified"
+      end
+      immutable(expected)
+    end
+
+    # Recovery-only helper called after GitTransition has proven every tracked
+    # index and worktree path belongs strictly to {from_tree, to_tree} and no
+    # untracked or ignored obstruction exists for `target_oid`.
+    def recover_index_and_worktree(repository_path:, target_oid:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      expected = exact_oid(target_oid, label: "recovery target OID")
+      commit = read(repository, :commit_oid, oid: expected)
+      unless commit.success? && commit.stdout.strip.downcase == expected
+        raise CommandFailed, "recovery target commit is unavailable"
+      end
+
+      command!(
+        repository, "read-tree", "--reset", expected,
+        error_class: CommandFailed,
+        message: "recovery index reset failed"
+      )
+      command!(
+        repository, "checkout-index", "--all", "--force",
+        error_class: CommandFailed,
+        message: "recovery working tree checkout failed"
+      )
+      command!(
+        repository, "update-ref", "--no-deref", "HEAD", expected,
+        error_class: CommandFailed,
+        message: "recovery HEAD update failed"
+      )
+      immutable(expected)
+    end
+
+    def materialize_owned_branch(repository_path:, branch:, oid:, destination:, destination_root:)
+      repository = repository_path(repository_path)
+      validate_repository_config!(repository)
+      name = branch_name(branch)
+      expected = exact_oid(oid, label: "materialization OID")
+      target = contained_destination(destination, destination_root)
+
+      resolved = command!(
+        repository, "rev-parse", "--verify", "#{expected}^{commit}",
+        error_class: MaterializationFailed,
+        message: "materialization object is unavailable"
+      ).strip.downcase
+      unless resolved == expected
+        raise MaterializationFailed,
+              "materialization object does not resolve to the exact requested commit"
+      end
+
+      if File.exist?(target) || File.symlink?(target) || worktree_paths(repository).include?(target)
+        raise MaterializationFailed,
+              "owned branch destination already exists or is registered"
+      end
+      if read(repository, :branch_oid, branch: name).success?
+        raise MaterializationFailed, "owned branch #{name} already exists"
+      end
+
+      FileUtils.mkdir_p(File.dirname(target))
+      command!(
+        repository, "worktree", "add", "-b", name, target, expected,
+        error_class: MaterializationFailed,
+        message: "owned branch materialization failed"
+      )
+      current_branch = read(target, :current_branch)
+      head = read(target, :head_oid)
+      status = read(target, :status)
+      unless current_branch.success? && current_branch.stdout.strip == name &&
+             head.success? && head.stdout.strip.downcase == expected &&
+             status.success? && status.stdout.empty?
+        raise MaterializationFailed, "owned branch materialization could not be verified"
+      end
+
+      MaterializationReceipt.new(
+        destination: immutable(target), oid: immutable(expected),
+        disposition: :created
+      )
+    rescue SystemCallError => e
+      raise MaterializationFailed, "materialization filesystem operation failed: #{e.class}"
     end
 
     # Materialize an already-present immutable commit into a detached worktree
@@ -629,6 +1061,29 @@ module Hive
       when :git_dir
         expect_parameters!(parameters)
         [ "rev-parse", "--absolute-git-dir" ]
+      when :git_common_dir
+        expect_parameters!(parameters)
+        [ "rev-parse", "--git-common-dir" ]
+      when :head_symbolic_ref
+        expect_parameters!(parameters)
+        [ "symbolic-ref", "--quiet", "HEAD" ]
+      when :ref_oid
+        ref = validated_readable_ref(parameters.delete(:ref))
+        expect_parameters!(parameters)
+        [ "rev-parse", "--verify", "--quiet", "#{ref}^{commit}" ]
+      when :tree_entries
+        oid = exact_oid(parameters.delete(:oid), label: "tree OID")
+        expect_parameters!(parameters)
+        [ "ls-tree", "-r", "-z", oid ]
+      when :index_entries
+        expect_parameters!(parameters)
+        [ "ls-files", "--stage", "-z" ]
+      when :untracked_files
+        expect_parameters!(parameters)
+        [ "ls-files", "--others", "--exclude-standard", "-z" ]
+      when :ignored_files
+        expect_parameters!(parameters)
+        [ "ls-files", "--others", "--ignored", "--exclude-standard", "-z" ]
       when :branch_oid
         branch = Hive::GitRef.validate_branch_name(parameters.delete(:branch))
         remote = parameters.delete(:remote) == true
@@ -772,14 +1227,19 @@ module Hive
     private_class_method :worktree_paths
 
     def observe_resolved_remote(repository, target, branch,
-                                allow_local_transport:)
+                                allow_local_transport:,
+                                timeout_sec: NETWORK_TIMEOUT_SEC)
       ref = "refs/heads/#{branch}"
-      out, _err, status, _overflow = capture(
+      out, err, status, _overflow = capture(
         repository, [ "ls-remote", "--heads", target, ref ],
         allow_local_transport: allow_local_transport,
-        timeout_sec: NETWORK_TIMEOUT_SEC
+        timeout_sec: timeout_sec
       )
-      raise CommandFailed, "remote branch observation failed" unless status.success?
+      unless status.success?
+        raise DeadlineExceeded, "remote branch observation timed out" if err.include?("managed Git command timed out")
+
+        raise CommandFailed, "remote branch observation failed"
+      end
 
       lines = out.lines.map(&:strip).reject(&:empty?)
       if lines.length > 1
@@ -801,6 +1261,116 @@ module Hive
       )
     end
     private_class_method :observe_resolved_remote
+
+    def observe_resolved_pull_request(repository, target, pr_number, fingerprint,
+                                      allow_local_transport:,
+                                      timeout_sec: NETWORK_TIMEOUT_SEC)
+      ref = "refs/pull/#{pr_number}/head"
+      out, err, status, _overflow = capture(
+        repository, [ "ls-remote", target, ref ],
+        allow_local_transport: allow_local_transport,
+        timeout_sec: timeout_sec
+      )
+      unless status.success?
+        if err.include?("managed Git command timed out")
+          raise DeadlineExceeded, "pull request observation timed out"
+        end
+
+        raise CommandFailed, "pull request head observation failed"
+      end
+
+      lines = out.lines.map(&:strip).reject(&:empty?)
+      if lines.length > 1
+        raise CommandFailed, "pull request head observation returned multiple records"
+      end
+      oid = nil
+      if lines.one?
+        value, returned_ref = lines.first.split(/\s+/, 2)
+        unless returned_ref == ref && value.to_s.downcase.match?(OID)
+          raise CommandFailed, "pull request head observation returned an invalid record"
+        end
+        oid = value.downcase
+      end
+      PullRequestObservation.new(
+        remote_fingerprint: immutable(fingerprint),
+        pr_number: pr_number,
+        ref: immutable(ref),
+        oid: immutable_or_nil(oid)
+      )
+    end
+    private_class_method :observe_resolved_pull_request
+
+    def effective_timeout(timeout_sec: nil, deadline: nil)
+      budget = if deadline
+        Float(deadline) - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      elsif !timeout_sec.nil?
+        Float(timeout_sec)
+      else
+        NETWORK_TIMEOUT_SEC.to_f
+      end
+      unless budget.finite? && budget.positive?
+        raise DeadlineExceeded, "network operation deadline expired"
+      end
+
+      [ budget, NETWORK_TIMEOUT_SEC.to_f ].min
+    rescue ArgumentError, TypeError
+      raise InvalidRequest, "network timeout is invalid"
+    end
+    private_class_method :effective_timeout
+
+    def positive_pr_number(value)
+      number = Integer(value)
+      raise InvalidRequest, "pull request number must be positive" unless number.positive?
+
+      number
+    rescue ArgumentError, TypeError
+      raise InvalidRequest, "pull request number must be positive"
+    end
+    private_class_method :positive_pr_number
+
+    def validated_internal_pr_ref(value, label:)
+      ref = value.to_s
+      suffix = ref.delete_prefix("refs/hive/internal-pr-checkout/")
+      if ref == suffix || suffix.empty?
+        raise InvalidRequest, "#{label} must stay under refs/hive/internal-pr-checkout/"
+      end
+
+      Hive::GitRef.validate_branch_name(suffix)
+      ref
+    rescue ArgumentError
+      raise InvalidRequest, "#{label} is invalid"
+    end
+    private_class_method :validated_internal_pr_ref
+
+    def validated_owned_deletable_ref(value)
+      ref = value.to_s
+      return validated_internal_pr_ref(ref, label: "owned ref") if ref.start_with?("refs/hive/internal-pr-checkout/")
+      return ref if ref.match?(/\Arefs\/heads\/hive\/review\/pr-[1-9][0-9]*\z/)
+
+      raise InvalidRequest, "ref is outside the owned deletable namespace"
+    end
+    private_class_method :validated_owned_deletable_ref
+
+    def validated_readable_ref(value)
+      ref = value.to_s
+      if ref.start_with?("refs/hive/internal-pr-checkout/")
+        return validated_internal_pr_ref(ref, label: "ref")
+      end
+      if ref.start_with?("refs/heads/")
+        Hive::GitRef.validate_branch_name(ref.delete_prefix("refs/heads/"))
+        return ref
+      end
+      if ref.start_with?("refs/remotes/origin/")
+        Hive::GitRef.validate_branch_name(ref.delete_prefix("refs/remotes/origin/"))
+        return ref
+      end
+      return ref if ref.match?(/\Arefs\/pull\/[1-9][0-9]*\/head\z/)
+
+      raise InvalidRequest, "readable ref is invalid"
+    rescue ArgumentError
+      raise InvalidRequest, "readable ref is invalid"
+    end
+    private_class_method :validated_readable_ref
 
     def resolve_remote_target(repository, remote, push:, allow_local_transport:)
       value = remote.to_s

@@ -37,7 +37,17 @@ module Hive
     # Immutable value object (Ruby 3.4 Data.define) so `pr_metadata` stays the
     # single validated constructor and the result is tamper-proof downstream.
     # Keyword construction + field readers are unchanged for consumers.
-    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state, :is_draft)
+    PrMetadata = Data.define(
+      :number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state, :is_draft,
+      :head_ref_name, :head_repository, :host, :repository
+    ) do
+      def initialize(number:, url:, base_ref_name:, head_ref_oid:, is_cross_repository:, state:,
+                     is_draft: nil, head_ref_name: nil, head_repository: nil, host: nil, repository: nil)
+        super
+      end
+
+      def head_oid = head_ref_oid
+    end
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
@@ -235,10 +245,30 @@ module Hive
     # `chdir` scopes `gh pr view` to a specific repo checkout. Ad-hoc review
     # passes the resolved project root so `hive review --pr N --project NAME`
     # run from another repo queries the right PR instead of cwd's repo.
-    def pr_metadata(number, cfg: nil, chdir: nil)
-      ensure_authenticated!(cfg)
-      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state,isDraft"
-      out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg, chdir: chdir)
+    def pr_metadata(number, cfg: nil, chdir: nil, host: nil, repository: nil,
+                    timeout_sec: nil, deadline: nil)
+      if (host && !repository) || (repository && !host)
+        raise Hive::GhError, "repository and host must be provided together for pull-request metadata"
+      end
+
+      auth_timeout = remaining_deadline_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      if host || auth_timeout
+        ensure_authenticated!(cfg, host: host, timeout_sec: auth_timeout)
+      else
+        ensure_authenticated!(cfg)
+      end
+
+      fields = "number,url,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,isDraft"
+      args = [ "gh", "pr", "view", number.to_s ]
+      if repository && host
+        args.push("--repo", RepositoryIdentity.github_repository_target(repository, host))
+      end
+      args.push("--json", fields)
+
+      view_timeout = remaining_deadline_timeout(timeout_sec: timeout_sec, deadline: deadline)
+      capture_options = { cfg: cfg, chdir: chdir }
+      capture_options[:timeout_sec] = view_timeout if view_timeout
+      out, err, status = capture3(*args, **capture_options)
       unless status.success?
         raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
       end
@@ -246,6 +276,9 @@ module Hive
       doc = JSON.parse(out)
       raise Hive::GhError, "`gh pr view #{number}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
 
+      parsed_url = parse_pull_request_url(doc["url"].to_s)
+      head_ref_name = doc["headRefName"].to_s.strip
+      head_ref_name = nil if head_ref_name.empty?
       PrMetadata.new(
         number: doc["number"].to_i,
         url: doc["url"].to_s,
@@ -253,10 +286,134 @@ module Hive
         head_ref_oid: doc["headRefOid"].to_s,
         is_cross_repository: doc["isCrossRepository"] == true,
         state: doc["state"].to_s,
-        is_draft: [ true, false ].include?(doc["isDraft"]) ? doc["isDraft"] : nil
+        is_draft: [ true, false ].include?(doc["isDraft"]) ? doc["isDraft"] : nil,
+        head_ref_name: head_ref_name,
+        head_repository: extract_head_repository(doc),
+        host: parsed_url&.fetch("host"),
+        repository: parsed_url&.fetch("repository")
       )
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
+    end
+
+    def validated_pr_metadata(number, expected_host: nil, expected_repository: nil,
+                              cfg: nil, chdir: nil, timeout_sec: nil, deadline: nil)
+      expected_number = Integer(number)
+      raise Hive::GhError, "pull request number must be positive" unless expected_number.positive?
+
+      metadata = pr_metadata(
+        expected_number,
+        cfg: cfg,
+        chdir: chdir,
+        host: expected_host,
+        repository: expected_repository,
+        timeout_sec: timeout_sec,
+        deadline: deadline
+      )
+      validate_pr_metadata!(
+        metadata,
+        expected_number: expected_number,
+        expected_host: expected_host,
+        expected_repository: expected_repository
+      )
+    rescue ArgumentError, TypeError
+      raise Hive::GhError, "pull request number must be positive"
+    end
+
+    def validate_pr_metadata!(metadata, expected_number:, expected_host: nil, expected_repository: nil)
+      raise Hive::GhError, "pull request metadata is invalid" unless metadata.is_a?(PrMetadata)
+
+      number = Integer(expected_number)
+      raise Hive::GhError, "pull request number must be positive" unless number.positive?
+      unless metadata.number == number
+        raise Hive::GhError, "pull request metadata returned ##{metadata.number}, expected ##{number}"
+      end
+
+      parsed = parse_pull_request_url(metadata.url)
+      unless parsed && parsed.fetch("number") == number
+        raise Hive::GhError, "pull request URL is not canonical"
+      end
+      if expected_host
+        host = RepositoryIdentity.validated_github_host(expected_host).downcase
+        unless parsed.fetch("host") == host
+          raise Hive::GhError, "pull request host #{parsed.fetch('host')} does not match #{host}"
+        end
+      end
+      if expected_repository
+        repo = RepositoryIdentity.validated_repository_slug(expected_repository).downcase
+        unless parsed.fetch("repository") == repo
+          raise Hive::GhError, "pull request repository #{parsed.fetch('repository')} does not match #{repo}"
+        end
+      end
+
+      head_oid = metadata.head_ref_oid.to_s.strip.downcase
+      unless head_oid.match?(/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/)
+        raise Hive::GhError, "pull request headRefOid is missing or malformed"
+      end
+
+      state = metadata.state.to_s.strip.upcase
+      unless %w[OPEN CLOSED MERGED].include?(state)
+        raise Hive::GhError, "pull request state #{metadata.state.inspect} is invalid"
+      end
+
+      base_ref_name = validated_branch_name(metadata.base_ref_name)
+      is_cross = metadata.is_cross_repository
+      unless is_cross == true || is_cross == false
+        raise Hive::GhError, "pull request isCrossRepository must be boolean"
+      end
+
+      head_ref_name = metadata.head_ref_name
+      if !head_ref_name.nil? && !head_ref_name.to_s.strip.empty?
+        head_ref_name = validated_branch_name(head_ref_name)
+      else
+        head_ref_name = nil
+      end
+
+      head_repository = metadata.head_repository
+      if !head_repository.nil? && !head_repository.to_s.strip.empty?
+        head_repository = RepositoryIdentity.validated_repository_slug(head_repository).downcase
+        if !is_cross && head_repository != parsed.fetch("repository")
+          raise Hive::GhError, "same-repository pull request head repository #{head_repository} contradicts #{parsed.fetch('repository')}"
+        end
+      else
+        head_repository = nil
+      end
+
+      PrMetadata.new(
+        number: number,
+        url: parsed.fetch("url"),
+        base_ref_name: base_ref_name,
+        head_ref_oid: head_oid,
+        is_cross_repository: is_cross,
+        state: state,
+        is_draft: metadata.is_draft,
+        head_ref_name: head_ref_name,
+        head_repository: head_repository,
+        host: parsed.fetch("host"),
+        repository: parsed.fetch("repository")
+      )
+    rescue ArgumentError, TypeError
+      raise Hive::GhError, "pull request metadata is invalid"
+    end
+
+    def read_pr_head_oid(frontmatter, allow_legacy: false)
+      return nil unless frontmatter.is_a?(Hash)
+
+      canonical = frontmatter["head_oid"]&.to_s&.strip&.downcase
+      legacy = frontmatter["head_ref_oid"]&.to_s&.strip&.downcase
+      canonical = nil if canonical.to_s.empty?
+      legacy = nil if legacy.to_s.empty?
+
+      if canonical && legacy && canonical != legacy
+        raise Hive::GhError, "pr.md head_oid contradicts legacy head_ref_oid"
+      end
+      selected = canonical || (allow_legacy ? legacy : nil)
+      return nil unless selected
+      unless selected.match?(/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/)
+        raise Hive::GhError, "pr.md head OID is malformed"
+      end
+
+      selected
     end
 
     # Parse the one pull-request URL shape Hive accepts at every trust
@@ -289,13 +446,22 @@ module Hive
     # Controller-owned PR identity refresh. Agent-authored prose is retained,
     # while the URL/number/head binding is replaced atomically after GitHub and
     # the local owned worktree agree.
-    def persist_pr_identity!(path, pr_url:, pr_number:, head_oid:)
+    def persist_pr_identity!(path, pr_url:, pr_number:, head_oid:, attributes: nil)
       parsed = parse_pull_request_url(pr_url)
       head = head_oid.to_s.downcase
       unless parsed && parsed.fetch("number") == Integer(pr_number) &&
              head.match?(/\A[a-f0-9]{40,64}\z/)
         raise Hive::GhError, "pull request identity is not canonical"
       end
+
+      extra = (attributes || {}).transform_keys(&:to_s)
+      extra.delete("pr_url")
+      extra.delete("pr_number")
+      extra.delete("head_oid")
+      extra.delete("head_ref_oid")
+      extra.delete("head_sha")
+      extra.delete("headRefOid")
+      replaced_keys = %w[pr_url pr_number head_sha head_oid head_ref_oid headRefOid] + extra.keys
 
       source = File.file?(path) ? File.binread(path) : ""
       lines = source.lines
@@ -305,24 +471,61 @@ module Hive
         closing = lines.each_index.drop(1).find { |index| lines[index].strip == "---" }
         if closing
           retained = lines[1...closing].reject do |line|
-            line.match?(/\A(?:pr_url|pr_number|head_sha|head_oid|headRefOid):/)
+            key = line[/\A([A-Za-z_][A-Za-z0-9_]*):/, 1]
+            key && replaced_keys.include?(key)
           end
           body = lines[(closing + 1)..]&.join.to_s.sub(/\A\s*\n/, "")
         end
+      end
+      extra_lines = extra.filter_map do |key, value|
+        next if value.nil?
+
+        YAML.dump({ key => value }).lines.drop(1).join
       end
       identity = [
         "---\n",
         "pr_url: #{parsed.fetch('url')}\n",
         "pr_number: #{parsed.fetch('number')}\n",
         "head_oid: #{head}\n",
+        *extra_lines,
         *retained,
         "---\n\n"
       ].join
       Hive::AtomicFile.write(path, "#{identity}#{body}", mode: 0o600)
+      Hive::AtomicFile.fsync_directory(File.dirname(path))
       true
     rescue ArgumentError, TypeError
       raise Hive::GhError, "pull request identity is not canonical"
     end
+
+    def extract_head_repository(doc)
+      repo = doc["headRepository"]
+      owner = doc["headRepositoryOwner"]
+      if repo.is_a?(Hash)
+        full = repo["nameWithOwner"].to_s.strip
+        return full.downcase unless full.empty?
+
+        name = repo["name"].to_s.strip
+        owner_login = owner.is_a?(Hash) ? owner["login"].to_s.strip : ""
+        return "#{owner_login}/#{name}".downcase unless owner_login.empty? || name.empty?
+      elsif repo.is_a?(String) && !repo.strip.empty?
+        return repo.strip.downcase
+      end
+      nil
+    end
+    private_class_method :extract_head_repository
+
+    def remaining_deadline_timeout(timeout_sec:, deadline:)
+      if deadline
+        remaining = Float(deadline) - monotonic_now
+        unless remaining.finite? && remaining.positive?
+          raise Hive::GhError, "network operation exceeded deadline"
+        end
+        return timeout_sec ? [ remaining, normalized_timeout(timeout_sec) ].min : remaining
+      end
+      timeout_sec ? normalized_timeout(timeout_sec) : nil
+    end
+    private_class_method :remaining_deadline_timeout
 
     def validated_branch_name(branch)
       Hive::GitRef.validate_branch_name(branch)

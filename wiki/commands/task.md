@@ -7,6 +7,8 @@ updated: 2026-11-11
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-task) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive task TARGET --project NAME --json` resolves one exact
 registered task and emits the same bounded `hive-task-workspace` v2 semantic
 document used by normal Hive Web task HTML. It is the native agent inspection
@@ -17,30 +19,14 @@ does not expand the former fleet-wide status graph.
 `hive task TARGET --project NAME --log` re-resolves a current diagnostic and
 prints only its integrity-checked bounded receipt-correlated tail.
 
-## Synopsis
-
-```bash
-hive task TARGET [--project NAME] [--json | --log]
-```
-
-`TARGET` follows `Hive::TaskResolver`: an exact path, globally unique slug, or
-task ID. Use `--project` for a bare slug or ID whenever more than one registered
-project could match. The command checks ordinary canonical status first and
-then the archive projection for that exact stage, so a retained archived task
-remains inspectable and is marked read-only.
-
-The exact project projection owns one read-only attempts-store scope through
-action and receipt-bound diagnostic annotation. It does not require a
-fleet-status caller to have opened that scope first.
-
-Without `--json`, the command prints a compact human summary: headline, action,
-primary-result reference, and usage coverage. `--json` is the stable machine
-surface and emits one schema-valid `hive-task-workspace` v2 document.
-`--log` is a read-only diagnostic surface and cannot be combined with `--json`.
-It fails closed when the semantic diagnostic is not current, the receipt
-reference changed, its digest/size is invalid, or the bounded file is absent.
-
 ## Meaning and boundaries
+
+`TARGET` resolves through `Hive::TaskResolver`. The command checks ordinary
+canonical status first and then the archive projection for that exact stage, so
+a retained archived task remains inspectable and read-only. The exact project
+projection owns one read-only attempts-store scope through action and
+receipt-bound diagnostic annotation without requiring a fleet-status caller to
+open that scope first.
 
 The command instantiates `Hive::TaskWorkspace::Builder#semantic` directly. It
 therefore shares Web's meaning instead of scraping HTML or maintaining a
@@ -123,23 +109,6 @@ artifact and diff responses to 512 KiB, including the escaped JSON envelope.
 Smaller `max_bytes` limits are accepted; a limit too small for control metadata
 returns 413. A truncated response says so explicitly. Artifact manifests retain
 the native 20-file/2-MiB aggregate limits and never use client-supplied paths.
-
-## Serialization and exit codes
-
-The semantic document is encoded directly. A `JSON::GeneratorError` is not
-replaced with prose or a fallback JSON document; it propagates.
-
-| Code | Meaning |
-|---:|---|
-| 0 | The semantic document, human summary, or correlated log tail was emitted. |
-| 1 | Current correlated diagnostic evidence was missing or failed integrity validation. |
-| 64 | The target was missing/ambiguous or `--log` was combined with `--json`. |
-| 78 | Project, workflow, or global configuration was invalid. |
-
-## Examples
-
-`hive task demo:checkout --json` emits the bounded semantic workspace; use
-`hive task checkout --project demo --log` for the correlated diagnostic tail.
 
 ## Tests
 

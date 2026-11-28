@@ -7,23 +7,15 @@ updated: 2026-09-02
 tags: [command, bench, corpus]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-bench-submit) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive bench submit SLUG [--project NAME]` extracts a completed
 (`9-done`) task into a [hive-bench](https://github.com/ivankuznetsov/hive-bench)
 corpus entry and opens a submission PR. A low-friction producer for the
 benchmark — it reuses hive-bench's own extractor and runs a local secret-token
 preflight, aborting before any PR if a secret is found.
 
-## Usage
-
-```bash
-hive bench submit SLUG [--project NAME] [--json]
-```
-
-`submit` is the only public bench subcommand. `--project` disambiguates a slug
-that exists in more than one registered project; `--json` changes only the
-success output.
-
-## Behavior
+## Implementation flow
 
 1. Resolves `SLUG` to a `9-done` task across registered projects (`--project`
    to disambiguate). A missing or ambiguous slug is a USAGE error (64).
@@ -69,28 +61,3 @@ success output.
   exact detached-HEAD restoration, and that the reported locator resolves at
   the recorded submission SHA. Live hive-bench / GitHub submission evidence is
   tracked in [[gaps]].
-
-## Exit codes and serialization
-
-Text mode is human-readable. `--json` success uses the unregistered
-`hive-bench-submit` schema described above; failures remain stderr plus an exit
-code rather than a structured error schema. The success producer calls
-`JSON.generate` directly, and a serialization failure propagates without a
-fallback document.
-
-| Code | Meaning |
-|---:|---|
-| 0 | The corpus entry was committed, pushed, and submitted. |
-| 64 | The subcommand, slug, project selection, source task, secret scan, extractor, Git operation, or PR creation failed its usage contract. |
-| 1 | An unexpected non-Hive failure escaped the command. |
-
-The success producer calls `JSON.generate` directly. A serialization failure
-is not replaced with text or a fallback JSON document; it propagates as a
-failed invocation.
-
-## Examples
-
-```bash
-hive bench submit completed-task-260901-abcd --project hive
-hive bench submit completed-task-260901-abcd --project hive --json
-```

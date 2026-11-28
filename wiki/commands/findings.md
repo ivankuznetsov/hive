@@ -7,25 +7,9 @@ updated: 2026-09-02
 tags: [command, findings, review, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#findings-triage) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive findings TARGET [--pass N] [--json]` lists the GFM-checkbox findings that the execute-stage reviewer wrote into `<task>/reviews/ce-review-NN.md`. `hive accept-finding TARGET ID...` ticks `[ ]` → `[x]` so a finding is re-injected into the next implementation pass; `hive reject-finding TARGET ID...` toggles back. The agent-callable replacement for hand-editing the review markdown.
-
-## Usage
-
-```
-hive findings <slug>                          # list findings of latest pass
-hive findings <slug> --stage execute          # disambiguate same slug in another stage
-hive findings <slug> --pass 1                 # specific pass
-hive findings <slug> --json                   # machine-readable
-
-hive accept-finding <slug> 1 3 5              # tick by IDs
-hive accept-finding <slug> 1 --stage execute  # disambiguate same slug in another stage
-hive accept-finding <slug> --severity high    # tick all High findings
-hive accept-finding <slug> --all              # tick everything
-hive accept-finding <slug> --json             # JSON envelope (success and error)
-
-hive reject-finding <slug> 2                  # untick id 2
-hive reject-finding <slug> --severity nit     # untick all Nit findings
-```
 
 ## Data model
 
@@ -63,113 +47,6 @@ The reviewer prompt writes a markdown file with severity headings and unchecked 
 6. Atomic write: tempfile + `File.rename`.
 7. Commit the change to `hive/state` (slug-scoped `git add`, single commit per command).
 8. Emit text or JSON report including a `next_action` pointing at `hive develop <slug>` to consume the new accepted set.
-
-## JSON contract (`schema = "hive-findings"`, version 1)
-
-### List success (`hive findings --json`)
-
-```json
-{
-  "schema": "hive-findings",
-  "schema_version": 1,
-  "ok": true,
-  "slug": "fix-bug-260424-aaaa",
-  "stage": "execute",
-  "stage_dir": "4-execute",
-  "task_folder": "/.../4-execute/fix-bug-260424-aaaa",
-  "review_file": "/.../4-execute/fix-bug-260424-aaaa/reviews/ce-review-02.md",
-  "pass": 2,
-  "findings": [
-    {
-      "id": 1,
-      "severity": "high",
-      "accepted": false,
-      "title": "memory leak in worker pool",
-      "justification": "process_pool doesn't drain on shutdown"
-    }
-  ],
-  "summary": {
-    "total": 5,
-    "accepted": 1,
-    "by_severity": { "high": 2, "medium": 2, "nit": 1 }
-  }
-}
-```
-
-### Toggle success (`hive accept-finding --json` / `hive reject-finding --json`)
-
-```json
-{
-  "schema": "hive-findings",
-  "schema_version": 1,
-  "ok": true,
-  "operation": "accept",
-  "slug": "fix-bug-260424-aaaa",
-  "review_file": "/.../ce-review-02.md",
-  "pass": 2,
-  "selected_ids": [1, 3],
-  "changes": [
-    { "id": 1, "severity": "high", "was": false, "now": true },
-    { "id": 3, "severity": "medium", "was": false, "now": true }
-  ],
-  "noop": false,
-  "summary": { "total": 5, "accepted": 3, "by_severity": { "high": 2, "medium": 2, "nit": 1 } },
-  "next_action": {
-    "kind": "run",
-    "folder": "/.../4-execute/fix-bug-260424-aaaa",
-    "command": "hive develop fix-bug-260424-aaaa",
-    "reason": "3 accepted finding(s) need a fresh implementation pass"
-  }
-}
-```
-
-The `changes` array is a subset of `selected_ids` — entries with no state change (idempotent re-toggle) are dropped. `noop: true` on the envelope means every selected ID was already in the requested state.
-
-### Error envelope
-
-```json
-{
-  "schema": "hive-findings",
-  "schema_version": 1,
-  "ok": false,
-  "operation": "accept",
-  "error_class": "UnknownFinding",
-  "error_kind": "unknown_finding",
-  "exit_code": 64,
-  "message": "no finding with id=99 in /.../ce-review-02.md (valid: [1, 2, 3, 4, 5])",
-  "id": 99
-}
-```
-
-`error_kind` enum: `ambiguous_slug`, `no_review_file`, `unknown_finding`, `invalid_task_path`, `error`.
-
-Pre-dispatch usage failures use the same `hive-findings.v1` envelope with
-`error_kind: "invalid_task_path"`; toggle failures also carry the requested
-`operation` (`accept` or `reject`). Findings and both toggle commands
-deliberately propagate `JSON::GeneratorError` from command-level error
-serialization rather than suppressing it.
-
-External consumers can validate against `schemas/hive-findings.v1.json`; resolve the path via `Hive::Schemas.schema_path("hive-findings")`.
-
-## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
-
-| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
-|---|---|---|---|---|---|---|
-| `hive findings` | Options: `--project`, `--stage`, `--pass`, `--json`. | Reads and lists the selected review document without taking the task lock. | JSON schema `hive-findings.v1`. | Missing reviews, invalid targets, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `70`. |
-| `hive accept-finding` | Options: `--project`, `--stage`, `--severity`, `--all`, `--json`. | Locks the task, checks selected IDs, atomically accepts findings, and commits the review file. | JSON schema `hive-findings.v1`. | Missing selections/reviews, unknown IDs, lock contention, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `70`, `75`. |
-| `hive reject-finding` | Options: `--project`, `--stage`, `--severity`, `--all`, `--json`. | Locks the task, checks selected IDs, atomically rejects findings, and commits the review file. | JSON schema `hive-findings.v1`. | Missing selections/reviews, unknown IDs, lock contention, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `70`, `75`. |
-
-## Exit codes
-
-| Condition | Exit | Class |
-|-----------|------|-------|
-| Success | 0 | — |
-| No findings selected (caller passed nothing actionable) | 64 (`USAGE`) | `Hive::InvalidTaskPath` |
-| Unknown finding ID | 64 (`USAGE`) | `Hive::UnknownFinding` |
-| No review file at the requested pass | 64 (`USAGE`) | `Hive::NoReviewFile` |
-| Slug ambiguous / unknown / `--project` mismatch | 64 (`USAGE`) | `Hive::InvalidTaskPath` / `AmbiguousSlug` |
-| Task lock held by another process | 75 (`TEMPFAIL`) | `Hive::ConcurrentRunError` |
-| Internal error (Errno, SystemCallError) | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
 ## Locking
 

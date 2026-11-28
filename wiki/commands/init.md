@@ -7,28 +7,13 @@ updated: 2026-10-14
 tags: [command, bootstrap, git, prompts, preview, minimal, llm-wiki, provisioning]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-init) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture discovery with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`. Accepted findings enter the shared Patrol Fix workflow; Architecture Patrol has no fix, issue, or PR engine. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
 
-## Usage
+## Workflow selection and legacy bench migration
 
-```
-hive init [PROJECT_PATH] [--force] [--json] [--workflow NAME] [--refactor-patrol|--no-refactor-patrol]
-hive init --new-workflow ID [PROJECT_PATH]
-hive init --new-workflow ID --minimal --preview --json [PROJECT_PATH]
-hive init --new-workflow ID --minimal --json [PROJECT_PATH]
-```
-
-`PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits the current `hive-init.v3` success document on stdout with project metadata and the resolved prompt answers. v3 dropped v2's `claude_mode` field when the Claude launch mode was removed (ADR-053 in [[decisions]]); `schemas/hive-init.v2.json` is retired. `--workflow NAME` selects the project default workflow and is validated against `Hive::Workflows::Registry`; unknown names fail before disk writes and list valid names.
-
-On a fresh init, `--refactor-patrol` and `--no-refactor-patrol` explicitly
-select `refactor_patrol.enabled` before Hive creates or writes project state.
-The flag skips the architecture-discovery question on TTY and overrides the
-recommended non-TTY default; omitting both keeps architecture patrol enabled.
-Enabling it writes only the discovery setting; accepted findings are handed to
-the shared Patrol Fix workflow. Disabling it writes discovery as false.
-An existing project rejects either selector before a workflow rebind or custom
-workflow scaffold can write anything; edit `refactor_patrol.enabled` in its
-project config when changing an established policy.
+On a fresh init, `--refactor-patrol` and `--no-refactor-patrol` select `refactor_patrol.enabled` before Hive writes project state; an existing project rejects either selector before a workflow rebind or custom workflow scaffold can write anything.
 
 For a project created with the former project-local `bench.yml`, run
 `hive init PROJECT_PATH --workflow bench` after upgrading. Hive recognizes only
@@ -166,12 +151,6 @@ This branch is what the orphan worktree is initially based on, and what feature 
 | `uncommitted changes` | dirty working tree | commit/stash, or pass `--force` |
 | `already initialized` (exit 2) | `hive/state` already exists | nothing to do |
 | `partial init failed` warning | disk-side-effect step raised after orphan-state creation | rerun after automatic rollback; if rollback was incomplete, inspect stderr and run the printed `git worktree remove ... && git branch -D hive/state` recovery command |
-
-## Serialization fallback
-
-The `hive-init.v3` and `hive-init-preview.v1` documents are encoded directly.
-A JSON serialization failure propagates and no prose or fallback JSON document
-is emitted.
 
 ## Tests
 

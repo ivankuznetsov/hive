@@ -7,6 +7,8 @@ updated: 2026-11-07
 tags: [command, brainstorm, answers, bindings, concurrency, json, agents]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-answer) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive answer` is the transport-neutral literal boundary for coding
 brainstorm answers. Without `--binding` it inventories the real
 `brainstorm.md` slots in physical order without writing or publishing a task
@@ -14,23 +16,6 @@ lock. With a fresh opaque binding it reads one final answer from stdin,
 revalidates task identity and the exact slot under a creation-disabled task
 lock, and writes only on a closed safe outcome. It does not recommend an answer
 and never dispatches or advances a stage.
-
-## Invocation
-
-```bash
-hive answer TARGET --project PROJECT --json
-printf '%s' "$ANSWER" |
-  hive answer TARGET --project PROJECT --binding TOKEN --json
-```
-
-`TARGET` may be a task id, slug, or task path accepted by
-`Hive::TaskResolver`. `--project` removes cross-project ambiguity and is
-also checked against a supplied binding. The task must resolve to the coding
-workflow at `2-brainstorm`; another workflow or stage is a wrong-stage error.
-
-Use `--json` for agent callers. Text inventory reports only
-`PROJECT/SLUG: UNANSWERED/TOTAL unanswered`; text mutation prints the same
-brief semantic acknowledgement carried by the JSON result.
 
 ## Read-only inventory
 
@@ -147,12 +132,6 @@ Question fingerprints use NFC plus whitespace collapsing. Canonically
 equivalent Unicode spellings match, while compatibility forms such as `①`/`1`,
 `x²`/`x2`, full-width text, and ligatures remain distinct so a compatibility-
 equivalent rewording fails closed.
-
-## Serialization fallback
-
-Both success and error arms are encoded directly as `hive-answer.v1`. If JSON
-serialization raises, Hive emits no prose or fallback JSON document; the
-serialization exception propagates through the command boundary.
 
 ## Lifecycle boundary
 

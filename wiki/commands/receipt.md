@@ -7,6 +7,8 @@ updated: 2026-11-08
 tags: [command, idempotency, receipts, sqlite, maintenance]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-receipt-prune) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: Hive can give the bounded C4 mutation surface durable, optional
 idempotency keys. A matching retry replays the original result without
 resolving the task again. Receipt maintenance is explicit, generation-fenced,

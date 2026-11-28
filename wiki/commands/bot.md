@@ -7,6 +7,8 @@ updated: 2026-11-22
 tags: [command, bot, telegram, mobile, json, closure]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-bot) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive bot SUBCOMMAND` runs the Telegram mobile surface for
 human-input gates. It long-polls Telegram, ignores chats outside the
 global allowlist, renders waiting/status rows with inline buttons,
@@ -15,25 +17,12 @@ notes, accepts typed or transcribed voice brainstorm answers, and
 dispatches the same `hive` workflow verbs the daemon and CLI already use.
 It is not a second approval engine.
 
-## Subcommands
+## Supervisor lifecycle
 
-```
-hive bot start [--foreground] [--dry-run]
-hive bot stop [--json]
-hive bot status [--json]
-hive bot reload [--json]
-hive bot tail
-hive bot install [--force] [--json]
-```
-
-| Subcommand | Behavior |
-|-----------|----------|
-| `start` | Loads `bot:` from the global config, requires `HIVE_TELEGRAM_BOT_TOKEN`, writes the bot PID file, then starts the long-poll/status/reaper supervisor. By default it daemonizes so the shell prompt returns immediately. With `--foreground`, it stays attached for systemd, launchd, or debugging. With `--dry-run`, inbound Telegram parsing and notifications still run but child `hive ...` dispatches are reported rather than spawned. A second live bot exits `75 (TEMPFAIL)`. |
-| `stop` | Sends `SIGTERM` to the PID file's process and waits up to `bot.shutdown_grace_sec`, then escalates to `SIGKILL`. Idempotent when no bot is running. With `--json`, emits `hive-bot-stop.v1`. |
-| `status` | Reports running/not-running and exits `0` when running, `1` when not. With `--json`, emits `hive-bot-status.v1` with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe — `systemctl --user is-enabled` / `launchctl list`) so an agent can tell whether `hive bot install` has run without a mutating call. |
-| `reload` | Sends `SIGHUP`; the supervisor reloads config at the next loop boundary while preserving in-flight children and conversations. With `--json`, emits `hive-bot-reload.v1`. |
-| `tail` | Streams `~/.local/state/hive/logs/bot.log`; exits 1 if the log does not exist. |
-| `install` | Installs and enables the bot's platform-native per-user service. It is always autostart-enabled, preserves drift unless `--force` is supplied, uses the invoked wrapper path, and emits `hive-bot-install.v1` with `--json`. Exit `64` means unauthorized drift and exit `70` means the transition could not prove a safe endpoint; a conclusively absent manager retains the compatible `unsupported` success. `hive uninstall` removes the service. Shared locking, replay, backup, and recovery behavior is owned by [[modules/user_service]]. |
+- **`start`**: Loads `bot:` from the global config, requires `HIVE_TELEGRAM_BOT_TOKEN`, writes the bot PID file, and runs the long-poll/status/reaper supervisor (daemonizing by default, or staying attached with `--foreground`). Under `--dry-run`, inbound parsing and notifications run while child `hive` dispatches are reported rather than spawned.
+- **`stop` / `reload`**: Sends `SIGTERM` (waiting up to `bot.shutdown_grace_sec` before `SIGKILL`) or `SIGHUP` (reloading config at the next loop boundary while preserving in-flight children and conversations).
+- **`status` / `tail`**: Read-only PID, autostart-service (`systemctl --user is-enabled` / `launchctl list`), and `~/.local/state/hive/logs/bot.log` observation.
+- **`install`**: Installs and enables the platform-native per-user service using the invoked wrapper path, delegating shared locking, replay, backup, and recovery behavior to [[modules/user_service]]; `hive uninstall` removes the service.
 
 The managed bot may start while offline. A transient Telegram polling failure
 stays inside the supervisor; the next poll begins after the one-second failed
@@ -340,28 +329,6 @@ service the daemon has (`hive daemon install`), built on the shared
   fallback on hosts without systemd-user / launchd.
 - **Teardown.** `hive uninstall` stops, disables, and removes the bot unit
   alongside the daemon unit. There is no standalone `hive bot uninstall`.
-
-## Exit codes
-
-Bot JSON producers do not define an alternate serialization document. If
-`JSON.generate` fails, no prose or second JSON payload is substituted; the
-encoding failure remains a failed invocation.
-
-| Subcommand | Code | Condition |
-|------------|------|-----------|
-| `start` | 0 | Background bot started, or foreground bot exited cleanly |
-| `start` | 75 | Another bot is already running |
-| `start` | 78 | Token/allowlist/config is missing or malformed |
-| `stop` | 0 | Always, including not-running |
-| `status` | 0 | Bot is running |
-| `status` | 1 | Bot is not running |
-| `reload` | 0 | SIGHUP sent |
-| `reload` | 1 | Bot is not running |
-| `tail` | 0 | Stream ended via Ctrl-C |
-| `tail` | 1 | Log file missing |
-| `install` | 0 | Unit written/upgraded/unchanged and autostart enabled, or written on a host with no service manager (`unsupported` outcome) |
-| `install` | 64 | Existing unit differs from the template; re-run with `--force` (USAGE) |
-| `install` | 70 | Service manager rejected enable/load (SOFTWARE) |
 
 ## Backlinks
 

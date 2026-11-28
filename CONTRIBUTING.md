@@ -1,6 +1,6 @@
 # Contributing to Hive
 
-Thanks for your interest. Hive is a folder-as-agent pipeline driving a six-stage filesystem state machine; bug reports, patches, and design feedback are all welcome.
+Thanks for your interest. Hive is a durable, local-first folder-as-agent workflow engine driving a filesystem state machine; bug reports, patches, and design feedback are all welcome.
 
 ## Reporting bugs
 
@@ -46,34 +46,13 @@ For security issues, see [SECURITY.md](SECURITY.md) — please do not open a pub
 
 ## CLI contract for agent callers
 
-Two surface guarantees that programmatic callers can rely on:
+[`docs/cli.md`](docs/cli.md) is the single authoritative public CLI reference for every visible `bin/hive` command, subcommand, alias, option, JSON/JSON-Lines/text framing contract, remote-context rule, side effect, and exit code. Machine-validation JSON schemas live under [`schemas/`](schemas/), and internal exit-code constants live in `Hive::ExitCodes` (`lib/hive/errors.rb`).
 
-### Exit codes
+When changing any visible command, subcommand, alias, option, behavioral mode, schema, or exit code:
 
-| Code | Meaning | Retry? |
-|------|---------|--------|
-| 0    | success                                             | n/a       |
-| 1    | generic failure (unclassified)                      | no        |
-| 2    | `hive init` ran on an already-initialised project   | no        |
-| 3    | task is in `:error` marker state (agent recorded a failure) | no — investigate task.md |
-| 4    | wrong stage (`hive run` on inert `1-inbox/`)        | no — `mv` first |
-| 64   | usage error (bad slug, malformed task path)         | no        |
-| 70   | internal failure (git, worktree, agent, stage)      | maybe — inspect logs |
-| 75   | retryable: lock contention                          | **yes**   |
-| 78   | bad config (project or global)                      | no        |
-
-Codes are surfaced via `Hive::Error` subclasses; `bin/hive` rescues them and exits with the contract code. Constants live in `Hive::ExitCodes`.
-
-### `--json` output
-
-Both `hive status` and `hive run` accept `--json`. Each emits a single JSON document on stdout with a `schema` + `schema_version` header so future evolution is explicit.
-
-```bash
-hive status --operational --json | jq '.tasks[] | select(.position.marker == "execute_waiting")'
-hive run /path/to/task --json | jq '.next_action'
-```
-
-`schema_version` will only bump when an existing key changes shape or is removed — adding new keys is non-breaking. Pin and assert the version in your wrapper if you depend on the contract.
+1. Update the owning leaf record in [`docs/cli.md`](docs/cli.md) (and its JSON schema under `schemas/` if wire output changes).
+2. Run `bin/test test/unit/docs_cli_authority_test.rb` to verify bidirectional parity against live `bin/hive` metadata and semantic invariants.
+3. Keep `schema_version` compatibility intact: bump `schema_version` only when an existing key changes shape or is removed; adding new keys is non-breaking.
 
 ## Tests
 
@@ -83,10 +62,9 @@ hive run /path/to/task --json | jq '.next_action'
 
 ## Scope discipline
 
-Hive's scope is deliberately narrow (see [Phase 1 deferred work](wiki/active-areas.md)). New features are most welcome when they hew to the project's identity:
+Hive's scope is deliberately focused (see [active areas](wiki/active-areas.md) and [`docs/architecture.md`](docs/architecture.md)). New features are most welcome when they preserve the project's identity:
 
-- Filesystem is the queue, markdown is the source of truth, `mv` is the API.
-- No daemon. No web UI. No tracker.
-- Single-developer trust model — `--dangerously-skip-permissions` is intentional.
+- Filesystem is the queue, markdown and git state are the source of truth, and every surface (CLI, TUI, native web UI, daemon, and bot) builds on the same durable local-first state machine documented in [`docs/cli.md`](docs/cli.md).
+- Single-developer trust model — non-interactive agent execution and explicit consent gates are deliberate.
 
 If a proposal would change one of these, open an issue first to discuss before sending a PR.

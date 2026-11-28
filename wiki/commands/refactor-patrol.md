@@ -7,44 +7,15 @@ updated: 2026-09-25
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-refactor-patrol) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive refactor-patrol` discovers evidence-backed architecture theses
 and routes each one to `fix`, `discuss`, or `dismiss`. Accepted `fix` and
 `discuss` dispositions are published to the shared Patrol Fix admission
 store. Architecture Patrol does not implement fixes, file issues, create
 branches, publish pull requests, or hand work directly to review.
 
-## Usage
-
-```bash
-# On-demand discovery
-hive refactor-patrol my-project
-hive refactor-patrol my-project --once --json
-hive refactor-patrol my-project --once --dry-run
-hive refactor-patrol my-project --feature route-home --changed-since origin/main
-hive refactor-patrol my-project --entrypoint bin/server
-hive refactor-patrol my-project --path lib/payments --json
-
-# Explicit merged-PR replay
-hive refactor-patrol my-project --pr 123 --json
-hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
-
-# Daemon/internal immutable-manifest discovery
-hive refactor-patrol my-project --job-manifest PATH --json
-
-# Read-only durable history
-hive refactor-patrol my-project --list
-hive refactor-patrol my-project --list --limit 50 --cursor CURSOR
-hive refactor-patrol my-project --show JOB_ID
-hive refactor-patrol my-project --show JOB_ID --full --json
-
-# One-time action-era cleanup after Patrol Fix import
-hive refactor-patrol my-project --archive JOB_ID --json
-```
-
-`--changed-since` is only a filter paired with `--feature`, `--entrypoint`, or
-`--path`. PR and job-manifest modes require JSON and cannot be combined with
-scope hints. `--list` and `--show` are read-only and cannot be combined with
-discovery options.
+## Archive cutover and one-shot admission
 
 `--archive` is a narrow administrative transition for historical action-era
 jobs after their accepted dispositions have been imported into Patrol Fix. It
@@ -53,22 +24,17 @@ linked pending actions, unresolved review errors, or pending remote-effect
 continuation evidence. Already-terminal actions remain immutable evidence. It
 preserves dispositions, claims, and existing receipts, adds an archive receipt
 with the prior outcome to each pending action, and marks the job complete.
-Repeating it for a complete job is a no-op. The command emits
-the final `hive-refactor-patrol-jobs.v2` show projection, so no second archive
-status contract exists.
+Repeating it for a complete job is a no-op.
 
 `--once` runs the daemon's merged-PR intake, classification, durable job
-discovery, and downstream handoff path for one project, then emits
-`hive-one-shot.v1`. It does not run the daemon's separately wired current-main
-scheduled-slice producer. Manual selectors (`--pr`, `--job-manifest`, scope
-hints, list/show/archive options) are incompatible with `--once`.
-`--once --dry-run` observes readiness without intake, reservation, checkpoint
-writes, or child execution. Intake deadlines use the configured daemon
-`pr_merge_poll_interval_sec`; the reported deadline and persisted checkpoint
-are the same absolute timestamp. Classification retries and active claims stay
-visible before a job exists. A persisted daemon controller project-drop hold
-suppresses child discovery and reports operator action; a blocked scheduler
-observation still fails the pass instead of being reported as an operator wait.
+discovery, and downstream handoff path for one project. It does not run the
+daemon's separately wired current-main scheduled-slice producer. Intake
+deadlines use the configured daemon `pr_merge_poll_interval_sec`; the reported
+deadline and persisted checkpoint are the same absolute timestamp.
+Classification retries and active claims stay visible before a job exists. A
+persisted daemon controller project-drop hold suppresses child discovery and
+reports operator action; a blocked scheduler observation still fails the pass
+instead of being reported as an operator wait.
 
 ## Read-only job-query pagination
 
@@ -144,30 +110,6 @@ records, preflights occurrence conflicts, and is idempotent against existing
 Patrol Fix admissions. It creates no workflow task folders; semantic admission
 and normal workflow capacity decide when a reserved disposition materializes.
 It does not revive an Architecture Patrol action lane.
-
-## Output
-
-Discovery emits `hive-refactor-patrol.v4`, including the immutable source,
-analysis SHA, routed dispositions, per-feature completion records, and review
-errors. New records contain no publication attempts or actions. `--list` and
-`--show` emit `hive-refactor-patrol-jobs.v2`; `--archive` emits the same
-projection after its guarded transition.
-
-## Serialization and exit codes
-
-All three JSON families are encoded directly. If `JSON.generate` fails, no
-prose or fallback JSON document is substituted; the encoding failure
-propagates. A best-effort daemon result-file write does not change that stdout
-contract.
-
-| Code | Meaning |
-|---:|---|
-| 0 | Discovery, query, show, or an idempotent archive completed. |
-| 1 | An ordinary discovery/job-state invariant failed. |
-| 64 | Query pagination, job identity, mode selection, or another public argument was invalid. |
-| 70 | An unexpected exception was wrapped as an internal error. |
-| 75 | A generation claim, checkout, or state lock was temporarily stale or busy. |
-| 78 | Project, policy, manifest, repository ownership, or scheduled input was invalid. |
 
 ## Backlinks
 

@@ -7,16 +7,12 @@ updated: 2026-11-07
 tags: [command, remote, authentication]
 ---
 
-The server-local token boundary issues personal bearer credentials for the
-versioned remote API. Its JSON contract is `hive-token.v1`. Public CLI
-registration is paired with the consuming remote transport.
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-token) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
 
-Public syntax is `hive token create --scopes read,create,act,answer --projects
-PROJECT[,PROJECT]`, `hive token list`, and `hive token revoke PUBLIC_ID`.
-`--name` and `--expires-at` are optional; use explicit `--all-projects` in place
-of named grants. All three are server-local commands and require
-`--context local` when a remote selection is active. No browser administration
-UI or remote lifecycle handler is added. Deployment prerequisites and the
+The server-local token boundary issues personal bearer credentials for the
+versioned remote API. Its JSON contract is `hive-token.v1`, and all three
+actions (`create`, `list`, `revoke`) are server-local with no browser
+administration UI or remote lifecycle handler. Deployment prerequisites and the
 incident runbook are in [[remote-access]].
 
 Scopes are independent: `read` inspects task content, `create` captures tasks,

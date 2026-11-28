@@ -7,6 +7,8 @@ updated: 2026-08-31
 tags: [command, artifacts, evidence, recovery]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-evidence) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive evidence recover` is the stale-safe operator acknowledgement
 for a semantically blocked package. `hive evidence rework` is Hive's guarded
 controller transition from a reviewed implementation defect back to execute.
@@ -21,33 +23,10 @@ existing generation. Use `recover` when an operator deliberately wants a fresh
 generation, or for reviewer and recapture-exhaustion blockers that Hive must not
 reinterpret automatically.
 
-## Usage
+## Controller capture boundaries
 
-```sh
-hive evidence recover TARGET \
-  --generation <sha256> \
-  --recovery-digest <sha256>
-
-hive evidence rework TARGET \
-  --stage 7-artifacts \
-  --generation <sha256> \
-  --recovery-digest <sha256>
-```
-
-Inside a producer context, Hive also issues:
-
-```sh
-hive evidence terminal NAME --json -- COMMAND...
-hive evidence browser snapshot -i
-hive evidence browser screenshot NAME.png --full
-hive evidence browser record start NAME.webm
-hive evidence browser record stop
-hive evidence server bin/rails --json -- server -b 127.0.0.1 -p PORT
-```
-
-This form requires controller-issued task/source/write roots and has no
-completion authority by itself.
-It launches one argv command directly, records an asciinema v2-compatible
+Inside a producer context, the terminal, browser, and server capture subcommands require controller-issued task/source/write roots and have no completion authority by themselves.
+The terminal boundary launches one argv command directly, records an asciinema v2-compatible
 `NAME.cast`, writes a bounded ANSI-free `NAME.txt`, and returns
 controller-observed paths, byte sizes, and SHA-256 digests. It does not invoke a
 shell, asciinema, VHS, or a terminal-GIF encoder. A nonzero child exit is
@@ -160,20 +139,6 @@ the source outcome-evidence pointer, so every contract-valid maximal reviewer
 payload remains recordable. Execute refuses to complete when the
 reviewed-to-final repository diff is empty; a distinct empty commit is not
 progress.
-
-## Serialization and exit codes
-
-JSON output is schema-less for this command and is encoded directly. A
-`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
-the encoding failure propagates.
-
-| Code | Meaning |
-|---:|---|
-| 0 | The requested recovery, rework, or controller capture completed. |
-| 1 | A current evidence/store/capture invariant failed. |
-| 64 | Arguments, target resolution, binding digests, or a gateway request were invalid or unavailable. |
-| 75 | A task lock or freshness-bound transition lost a concurrent race. |
-| 78 | Project or workflow configuration was invalid. |
 
 ## Backlinks
 

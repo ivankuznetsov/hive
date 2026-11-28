@@ -7,18 +7,13 @@ updated: 2026-11-20
 tags: [command, rebase, read-only, inspector]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-rebase-status) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive rebase-status TARGET` is the read-only inspector for the auto-rebase pre-step. It reports whether the next `hive run` would attempt a rebase, how far behind `origin/<default_branch>` the worktree is, and which guard (if any) would short-circuit. **Never mutates anything; never calls `git fetch`** — it uses whatever the local `origin/<default>` ref already points at. Originated from PR #69 review AGENT-O3: operators and agents want to ask "would hive rebase this task right now?" without paying the cost of running it.
 
-## Usage
-
-```
-hive rebase-status <slug> [--project NAME] [--stage STAGE] [--json]
-hive rebase-status <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
-```
-
-`TARGET` resolution is identical to [[commands/run]]: bare slug, slug + filters, or absolute folder path. The output describes what `Hive::Rebase.perform(task, cfg)` would do if invoked immediately — guard order mirrors [[modules/rebase]] one-for-one, except `fetch_default_branch` is deliberately skipped.
-
 ## States
+
+`TARGET` resolution mirrors [[commands/run]]; guard evaluation mirrors [[modules/rebase]] one-for-one except `fetch_default_branch` is deliberately skipped.
 
 | State | Text output | Meaning |
 |-------|-------------|---------|
@@ -34,28 +29,6 @@ hive rebase-status <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 | `no_drift` | `<slug>: 0 commits behind origin/<default>; nothing to rebase` | Already up-to-date relative to the locally-known `origin/<default>` |
 | `would_rebase` | `<slug>: N commits behind origin/<default>; next `hive run` would attempt rebase` | Drift detected — `hive run` would invoke `Hive::Rebase.perform` |
 
-## JSON envelope (`--json`)
-
-```json
-{
-  "schema": "hive-rebase-status",
-  "slug": "<slug>",
-  "stage": "4-execute",
-  "folder": "<absolute folder path>",
-  "worktree_path": "<absolute worktree path>",
-  "state": "would_rebase",
-  "would_rebase": true,
-  "commits_behind": 3,
-  "default_branch": "main"
-}
-```
-
-- `state` is one of the ten values in the table above (snake_case).
-- `would_rebase` is `true` only when `state == "would_rebase"`.
-- `commits_behind` and `default_branch` are present for `no_drift` and `would_rebase`; otherwise omitted.
-
-This envelope is intentionally **not** validated against `hive-run.v1` — it's a sibling read-only schema. The producer is `Hive::Commands::RebaseStatus#emit_json`. A missing `TARGET` or extra positional rejected before dispatch emits the same `hive-rebase-status` error shape on stdout before the human `hive:` stderr line.
-
 ## Why no fetch?
 
 Two reasons:
@@ -66,18 +39,6 @@ Two reasons:
 ## Relationship to `hive run`
 
 `rebase-status` mirrors `hive run`'s complete auto-rebase guard order, with the fetch + actual rebase removed. Controller workflows and managed draft-PR handoffs are excluded before the generic `Hive::Rebase.perform` ladder. If `rebase-status` reports `would_rebase` with `commits_behind: N`, then `hive run` will start a rebase attempt of N commits (assuming nothing changes between the two invocations). If `rebase-status` reports a skip-state, `hive run` will surface the same state via `Hive::Rebase::Result.reason` in its JSON envelope.
-
-## Serialization and exit codes
-
-The success producer calls `JSON.generate` directly. A serialization failure is
-not replaced with text or a fallback JSON document; it propagates.
-
-| Code | Meaning |
-|---:|---|
-| 0 | A text or JSON status was emitted for the resolved task. |
-| 64 | The target or public argument shape was invalid or ambiguous. |
-| 70 | A Git/worktree software boundary failed. |
-| 78 | Project configuration was invalid. |
 
 ## Backlinks
 

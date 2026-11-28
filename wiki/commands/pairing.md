@@ -7,20 +7,13 @@ updated: 2026-09-02
 tags: [command, bot, telegram, pairing, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-pairing) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive pairing` is the owner-side approval surface for Telegram bot
 first-contact pairing. Unknown DM chats can send `/start` when
 `bot.pairing_enabled: true`; the bot returns a one-time code, and the owner
 runs `hive pairing approve telegram <CODE>` to append that chat id to the
 global bot allowlist.
-
-## Synopsis
-
-```bash
-hive pairing list [--json]
-hive pairing approve telegram <CODE> [--json]
-```
-
-`telegram` is a fixed literal, not a platform registry.
 
 ## Behavior
 
@@ -66,18 +59,6 @@ therefore leaves the code retryable under the CLI contract, while a success
 reports whether the running bot reloaded or needs a restart.
 If the pending store is unreadable, the page renders that command error in the
 pairing panel; it never substitutes "No pending pairing requests."
-
-## Serialization and exit codes
-
-Both pairing schemas are encoded directly with `JSON.generate`. A serialization
-failure is not replaced with prose or a fallback JSON document; it propagates.
-
-| Code | Meaning |
-|---:|---|
-| 0 | The pending list was read or the approval transaction completed. |
-| 1 | The code was unknown/expired, the store or notice queue failed, or reload signaling failed after validation. |
-| 64 | The subcommand, platform, code, or argument shape was invalid. |
-| 78 | Global bot configuration was invalid. |
 
 ## Related
 

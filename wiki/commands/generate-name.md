@@ -7,23 +7,9 @@ updated: 2026-09-02
 tags: [command, display-name, task-id]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-generate-name) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive generate-name TARGET` resolves a task by path, slug, or numeric id, asks the configured execute agent for a short title, sanitizes the final message, writes it into `<task>/meta.yml` as `display_name`, and commits `hive: <stage>/<slug> named` on `hive/state`.
-
-## Usage
-
-```bash
-hive generate-name TARGET [--project NAME] [--stage STAGE]
-```
-
-`TARGET` is resolved through `Hive::TaskResolver`, so it accepts:
-
-- A task folder path.
-- A bare slug.
-- A numeric task id from `<task>/meta.yml`.
-
-`--project` scopes slug/id lookup to one registered project. `--stage` accepts a full stage dir (`2-brainstorm`) or short name (`brainstorm`) and narrows slug/id lookup or validates a path target.
-
-There is no `--json` payload for this command. On success it prints the generated display name. Expected generation, task-custody, lock-contention, metadata, and filesystem failures emit a bounded diagnostic, print no name, and return nil; resolver failures still surface through the normal `Hive::Error` path. Unexpected programming failures are not swallowed.
 
 ## Pipeline
 
@@ -52,25 +38,6 @@ hive generate-name <task_dir>
 ```
 
 That spawn redirects the wrapper command's stdout/stderr to `<state_home>/logs/display-name.log` and intentionally does not block capture. If it fails, rerun this command for the task. Daemon and status refreshes never retry name generation.
-
-## Exit codes
-
-The command exits `0` when the generator returns, including its documented
-fail-soft `nil` result. Target-resolution errors retain the shared code `64`,
-invalid configuration uses `78`, and an uncaught agent/Git/software failure
-uses its shared Hive error code. There is no command JSON schema, so a
-serialization fallback is not applicable.
-
-## Examples
-
-`hive generate-name 42 --project demo` resolves a numeric task id; use
-`hive generate-name demo-task --project demo --stage 2-brainstorm` when the
-slug needs explicit project and stage disambiguation.
-
-## Serialization fallback
-
-The command is text-only and has no JSON schema, so JSON serialization and a
-serialization fallback are not applicable.
 
 ## Tests
 

@@ -7,6 +7,8 @@ updated: 2026-08-30
 tags: [command, install, update, migration]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-update) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 `hive update [--dry-run]` runs the owning install channel's updater, resolves
 its installed binary, then runs `hive runtime status`. `--dry-run` prints both
 commands. No migration or cutover confirmation is performed.

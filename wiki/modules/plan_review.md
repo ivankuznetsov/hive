@@ -7,6 +7,8 @@ updated: 2026-11-22
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-plan-review-target-show) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: Every built-in coding task now has a policy-driven critique substate
 inside `3-plan`. A readable `plan.md` is classified as `skip`, `standard`, or
 `mandatory`; non-skipped plans receive whole-document and independent
@@ -601,26 +603,12 @@ detached checkout of the execution base (`origin/<default>` after a fetch, else
 the local default branch), never the project checkout's `HEAD`, which may be an
 unrelated or stale branch with local edits.
 
-Authority-bearing actions use:
-
-```text
-hive plan-review TARGET ACTION \
-  --review-id REVIEW_ID \
-  --task-generation GENERATION \
-  --policy-fingerprint SHA256 \
-  --expected-artifact-digest SHA256 \
-  [--target-fingerprint FINGERPRINT] [--answer TEXT] \
-  [--coverage NAME] [--level LEVEL] [--reason TEXT]
-```
-
-Read the current identities first with the lock-free, read-only
-`hive plan-review TARGET show [--json]` (`hive-plan-review-show.v1`). It reads
-the task's plan-review projection directly, reports the `TransitionGuard`
-freshness verdict decisions must pass, and lists open findings with their
-fingerprints; operational status can be a daemon-cached snapshot that lags each
-decision, which made chained decisions fail as stale. Each successful action's
-JSON also returns the next `observation_digest`, so several decisions can be
-chained without re-reading.
+Authority-bearing `hive plan-review TARGET ACTION` commands (canonical syntax,
+flags, schemas, and exits in [docs/cli.md](../../docs/cli.md#hive-plan-review-target-show))
+require live freshness identities from the lock-free, read-only `show`
+projection rather than a daemon-cached operational snapshot, which can lag
+chained decisions. Each successful action's JSON also returns the next
+`observation_digest`, so several decisions can be chained without re-reading.
 
 `show` also returns `current_task_generation` (the live task's generation,
 which differs from `task_generation` when the review is stale), the review's

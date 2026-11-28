@@ -7,22 +7,13 @@ updated: 2026-09-02
 tags: [command, markers, recovery, json]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-markers-clear) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME]
 [--json]` is a low-level maintenance command that validates and removes marker
 history while holding the project commit lock, typed task lease, and narrower
 marker writer mutex in that order, then records a `hive_commit`. Normal agent
 recovery uses the fresh `workflow.retry` action from operational status.
-
-## Usage
-
-```
-hive markers clear <slug>          --name REVIEW_STALE       # bare slug
-hive markers clear <task-folder>   --name REVIEW_CI_STALE    # explicit path
-hive markers clear <slug>          --name REVIEW_ERROR --project myproj
-hive markers clear <slug>          --name REVIEW_STALE --json
-hive markers clear <folder>        --name ERROR --match-attr marker_id=abc123
-hive markers clear <folder>        --name ERROR --match-attr reason=exit_code,exit_code=143
-```
 
 ## Allowlist
 
@@ -54,49 +45,6 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 7. Record `hive: <stage>/<slug> markers clear <NAME>` while all three scopes
    remain held, then release in reverse order.
 8. Emit the human or one-line JSON summary and next-run hint.
-
-## JSON contract (`schema = "hive-markers-clear"`, version 1)
-
-### Success
-
-```json
-{
-  "schema": "hive-markers-clear",
-  "schema_version": 1,
-  "ok": true,
-  "folder": "/home/you/Dev/proj/.hive-state/stages/6-review/feat-x-260424-aaaa",
-  "slug": "feat-x-260424-aaaa",
-  "marker_cleared": "REVIEW_STALE"
-}
-```
-
-### Error envelope (every failure path under `--json`)
-
-```json
-{
-  "schema": "hive-markers-clear",
-  "schema_version": 1,
-  "ok": false,
-  "error_class": "WrongStage",
-  "error_kind": "wrong_stage",
-  "exit_code": 4,
-  "message": "hive markers clear: marker \"REVIEW_COMPLETE\" is not in the allowlist (...)"
-}
-```
-
-The `error_kind` enum mirrors `hive approve --json`: `ambiguous_slug`, `wrong_stage`, `invalid_task_path`, `error`. `hive-markers-clear.v1` intentionally retains its narrower key set and does not expose commit-lock holder or path metadata. Pre-dispatch usage failures use the same envelope with `error_kind: "invalid_task_path"`. Command-level error serialization deliberately propagates `JSON::GeneratorError`. The published JSON Schema lives at `schemas/hive-markers-clear.v1.json`.
-
-## Exit codes
-
-| Condition | Exit | Class |
-|-----------|------|-------|
-| Success | 0 | — |
-| Slug not found / unknown subcommand / missing `FOLDER` or `--name` | 64 (`USAGE`) | `Hive::InvalidTaskPath` |
-| Slug ambiguous (cross-project or multi-stage in one project) | 64 (`USAGE`) | `Hive::AmbiguousSlug` |
-| Marker not in allowlist (e.g. `REVIEW_COMPLETE`) | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
-| Requested `--name` does not match the actual marker on the file | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
-| Any `--match-attr` key/value does not match the current marker attrs | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
-| Internal failure (git, fs) | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
 ## Why this maintenance command exists
 

@@ -260,7 +260,58 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_help_and_command_help_are_equivalent_without_dispatching_status
+    with_tmp_global_config do |home|
+      with_tmp_dir do |dir|
+        probe = File.join(dir, "status_dispatched")
+        preload = File.join(dir, "status_dispatch_probe.rb")
+        File.write(preload, <<~RUBY)
+          require "hive/cli"
+          Hive::CLI.class_eval do
+            alias_method :__orig_status_for_help_probe, :status
+            define_method(:status) do |*args|
+              File.write(ENV.fetch("HIVE_STATUS_DISPATCH_PROBE"), "called")
+              __orig_status_for_help_probe(*args)
+            end
+          end
+        RUBY
+        env = {
+          "HIVE_HOME" => home,
+          "HOME" => home,
+          "PATH" => ENV.fetch("PATH", ""),
+          "COLUMNS" => "140",
+          "HIVE_STATUS_DISPATCH_PROBE" => probe,
+          "RUBYOPT" => [ ENV["RUBYOPT"], "-r#{preload}" ].compact.join(" ")
+        }
+        bin = File.expand_path("../../bin/hive", __dir__)
+        lib = File.expand_path("../../lib", __dir__)
+
+        top_out, top_err, top_status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, "help")
+        assert top_status.success?, top_err
+        assert_match(/^\s+\S*hive status\s+#/, top_out)
+
+        %w[status approve daemon context operation].each do |command|
+          flag_out, flag_err, flag_status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, command, "--help")
+          help_out, help_err, help_status = Open3.capture3(env, RbConfig.ruby, "-I#{lib}", bin, "help", command)
+
+          assert flag_status.success?, "#{command} --help failed: #{flag_err}"
+          assert help_status.success?, "help #{command} failed: #{help_err}"
+          assert_equal normalize_command_help(help_out), normalize_command_help(flag_out),
+                       "normalized help for #{command} --help and help #{command} must match"
+        end
+
+        refute File.exist?(probe), "help invocations must never dispatch Hive::CLI#status"
+      end
+    end
+  end
+
   private
+
+  def normalize_command_help(text)
+    usage = text[/^Usage:\n\s+(.+)$/, 1].to_s.strip.sub(/\A\S+/, "hive")
+    options = text.scan(/^\s+(--[a-z0-9-]+(?:\s*,\s*--[a-z0-9-]+)*)/i).flatten.map(&:strip).sort
+    { usage: usage, options: options }
+  end
 
   def with_cli_project
     with_tmp_global_config do

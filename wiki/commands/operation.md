@@ -7,6 +7,8 @@ updated: 2026-11-07
 tags: [command, remote, receipt]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-operation) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 `hive operation ID --project PROJECT --context NAME [--json]` looks up one
 durable remote command receipt and its linked task/attempt progress. The ID is
 returned as `operation_id` in a mutation acknowledgement. The project must be

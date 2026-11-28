@@ -7,24 +7,14 @@ updated: 2026-09-10
 tags: [command, digest, activity, history, json, telegram, retention]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-digest) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 `hive digest` reads one saved changes document. PRDigest collects descriptions
 and relevant patches; Hive's configured agent writes the text, and Hive stores
 and delivers it. Any registered agent and model may write it:
 `daily_digest.agent`/`model`/`effort` select the route (default: the `execute`
-stage agent), and optional `daily_digest.fallback_agents` (a list of
-`{agent, model?, effort?}`) are tried in order when a route fails; an
+stage agent), and optional `daily_digest.fallback_agents` (a list of `{agent, model?, effort?}`) are tried in order when a route fails; an
 all-routes failure names every cause. See [[modules/daily-digest]] for the integration contract.
-
-```bash
-hive digest                         # saved document as text
-hive digest --json                  # includes document and source references
-hive digest --date YYYY-MM-DD        # a saved date
-hive digest --open-web              # open the saved digest in Web
-hive digest refresh --json           # generate yesterday
-hive digest refresh --date YYYY-MM-DD --json  # historical day or today's preview
-hive digest send --date YYYY-MM-DD --json     # send a saved closed document
-hive digest prune --before YYYY-MM-DD --dry-run --json # projection-only retention
-```
 
 Default reads return today's preview if present, otherwise the latest saved
 document. Always inspect `local_date`; adjacent saved dates need not be adjacent

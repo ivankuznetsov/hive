@@ -7,42 +7,11 @@ updated: 2026-11-22
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#day-to-day-workflow) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode and an interactive, evidence-bound `already_delivered` / `superseded` closure mode. Ordinary archive safety is unchanged: only `Hive::TaskClosure` can invoke the internal guarded-archive protocol (`Hive::Commands::GuardedArchive`) that retires an active task from outside its workflow's ordinary terminal transition. Automatic same-repository merge closure uses that same protocol; there is no marker-reason archive bypass.
 
-## Usage
-
-```
-hive brainstorm <slug>                    # promote 1-inbox → 2-brainstorm, run brainstorm
-hive plan <slug>                          # promote 2-brainstorm → 3-plan, run plan
-hive develop <slug>                       # promote 3-plan → 4-execute, run develop
-hive open-pr <slug>                       # promote 4-execute → 5-open-pr, open draft PR
-hive review <slug>                        # promote 5-open-pr → 6-review, run review
-hive review --pr 197                      # create/reuse 6-review/adhoc-review-pr-197, run review
-hive artifacts <slug>                     # promote 6-review → 7-artifacts, collect artifacts
-hive finalize <slug>                      # promote 7-artifacts → 8-finalize, finalize PR
-hive archive <slug>                       # confirm PR MERGED, promote 8-finalize → 9-done, run archive
-hive archive <slug> --reason already_delivered \
-  --evidence owner/repo#42                # verify, preview, confirm y/N (or --yes), archive
-hive archive <slug> --reason superseded \
-  --evidence other/repo#7 \
-  --successor project:new-task \
-  --attestation "Delivered by the successor"
-hive archive <slug> --reason superseded \
-  --successor project:rails-port \
-  --attestation "The Rails port replaces this task"  # successor is the proof; keeps worktree
-hive archive <slug> --reason cancelled \
-  --attestation "No longer wanted"         # preserve history and worktree; no delivery claim
-hive archive <slug> --reason cancelled \
-  --attestation "No longer wanted" --json  # read-only preview: mode=preview, applied=false, next
-hive archive <slug> --reason cancelled \
-  --attestation "No longer wanted" --yes --json  # archive; hive-task-closure-result, applied=true
-hive archive                              # list every 9-done task via Status archive mode
-hive archive --json                       # hive-status payload filtered to 9-done rows
-
-hive plan <slug> --from 2-brainstorm      # idempotency assertion for retry
-hive plan <slug> --project NAME           # multi-project disambiguation
-hive plan <slug> --json                   # machine-readable hive-stage-action envelope
-```
+## CLI overlays
 
 No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.nil?`, it constructs `Hive::Commands::Status.new(json: options[:json], archive: true)` and returns before `StageAction` is involved. Only `hive archive <target>` uses the promote-or-run workflow semantics below.
 
@@ -175,93 +144,7 @@ identity-mismatched receipts are quarantined and never authorize a move.
    daemon's merged-PR reconciliation keeps its own closure receipt path.
 9. **Promote**: call `Hive::Commands::Approve` with `to: target_stage`, `from: current_stage`, and `quiet: @json` so the inner Approve doesn't double-emit.
 10. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
-11. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).
-
-## JSON contract (`schema = "hive-stage-action"`, version 2)
-
-### Success
-
-```json
-{
-  "schema": "hive-stage-action",
-  "schema_version": 2,
-  "ok": true,
-  "verb": "plan",
-  "phase": "promoted_and_ran",
-  "noop": false,
-  "slug": "fix-bug-260424-aaaa",
-  "from_stage_dir": "2-brainstorm",
-  "to_stage_dir": "3-plan",
-  "task_folder": "/home/you/Dev/proj/.hive-state/stages/3-plan/fix-bug-260424-aaaa",
-  "marker_after": "waiting",
-  "next_action": {
-    "key": "needs_input",
-    "label": "Needs your input",
-    "command": "hive plan fix-bug-260424-aaaa --from 3-plan"
-  }
-}
-```
-
-`phase` enum: `promoted_and_ran` (Approve then Run), `ran` (already at target — Run only), `noop` (archive against already-archived task).
-
-### Error envelope
-
-```json
-{
-  "schema": "hive-stage-action",
-  "schema_version": 2,
-  "ok": false,
-  "verb": "plan",
-  "error_class": "WrongStage",
-  "error_kind": "wrong_stage",
-  "exit_code": 4,
-  "message": "task is at 3-plan but --from expected 2-brainstorm (idempotency check: a prior call may have already advanced this task)"
-}
-```
-
-`error_kind` enum: `ambiguous_slug`, `destination_collision`, `final_stage`, `wrong_stage`, `rollback_failed`, `invalid_task_path`, `dependency_wait`, `admission_error`, `error`.
-
-The enum is classified by the composed Approve command, so direct approve and
-workflow-stage envelopes cannot drift on the same transition exception.
-
-Pre-dispatch argv-shape failures, such as too many positionals, use the same
-`hive-stage-action.v2` envelope with `error_kind: "invalid_task_path"` and a
-`verb` field naming the requested public verb (`pr` maps to `open-pr`).
-Command-level error serialization deliberately propagates
-`JSON::GeneratorError`.
-
-Dependency errors also carry `reason_code`, `offending_ref`, and
-`safe_correction`. `dependency_wait` is retryable after the prerequisite
-reaches its gate; `admission_error` requires repairing the named metadata,
-plan, workflow, enrollment, or repository-identity evidence.
-
-In JSON mode, the inner Approve and Run are quieted so the envelope is a single parseable document. In text mode, Approve and Run emit their normal prose since that output is intended for humans.
-
-External consumers can validate the current contract through `Hive::Schemas.schema_path("hive-stage-action")`, which resolves to `schemas/hive-stage-action.v2.json`; `schemas/hive-stage-action.v1.json` remains in tree for pinned legacy consumers.
-
-## Examples
-
-- `hive brainstorm TASK --from 1-inbox`
-- `hive develop TASK --from 3-plan`
-- `hive open-pr TASK --from 4-execute`
-- `hive artifacts TASK --from 6-review`
-- `hive finalize TASK --from 7-artifacts`
-
-The same usage section defines `plan`, `review`, and `archive`; all eight verbs
-share this owner and the `hive-stage-action` v2 contract.
-
-## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
-
-| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
-|---|---|---|---|---|---|---|
-| `hive brainstorm` | Options: `--from`, `--project`, `--json`. | Promotes or runs the brainstorm stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive plan` | Options: `--from`, `--project`, `--json`. | Promotes or runs the plan stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive develop` | Options: `--from`, `--project`, `--json`. | Promotes or runs the execute stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive open-pr` | Options: `--from`, `--project`, `--json`. | Promotes or runs the open-PR stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive review` | Options: `--from`, `--project`, `--pr`, `--json`. | Promotes or runs review; `--pr` creates or reuses an ad-hoc review task first. | JSON schema `hive-stage-action.v2`. | Invalid paths, PR ownership, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive artifacts` | Options: `--from`, `--project`, `--json`. | Promotes or runs the artifacts stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive finalize` | Options: `--from`, `--project`, `--json`. | Promotes or runs the finalize stage. | JSON schema `hive-stage-action.v2`. | Invalid paths, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
-| `hive archive` | Options: stage-action flags plus `--reason`, `--evidence`, `--successor`, and `--attestation` for evidence-bound closure. | With a target, promotes/runs or closes the task; without a target, lists terminal history. | Target JSON uses schema `hive-stage-action.v2`; no-target JSON uses the status contract. | Invalid paths, closure evidence, stage state, dependencies, and internal failures use typed errors. | `JSON::GeneratorError` propagates on the stage-action path; no fallback JSON is emitted. | Exit codes `0`, `1`, `4`, `64`, `70`, `75`, `78`. |
+11. **Emit**: in JSON mode, inner Approve and Run are quieted so a single `hive-stage-action` envelope is emitted; transition errors are classified through `Hive::Commands::Approve.error_kind_for` so direct approve and stage actions stay aligned.
 
 ## Idempotency contract
 
@@ -274,19 +157,6 @@ share this owner and the `hive-stage-action` v2 contract.
 Agents driving the pipeline always pass `--from <expected-current-stage>` so a retry after a network blip surfaces the actual state instead of silently double-advancing.
 
 For `archive` specifically: a second invocation against an already-archived task is a clean no-op (phase: `noop`, exit 0, `next_action.key: archived`) instead of re-running the Done agent.
-
-## Exit codes
-
-| Condition | Exit | Class |
-|-----------|------|-------|
-| Success | 0 | — |
-| Wrong stage / `--from` mismatch / non-terminal marker | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
-| Slug ambiguous / unknown / `--project` mismatch | 64 (`USAGE`) | `Hive::InvalidTaskPath` / `AmbiguousSlug` |
-| Destination collision | 1 (`GENERIC`) | `Hive::DestinationCollision` |
-| Dependency below its gate | 75 (`TEMPFAIL`) | `Hive::DependencyWaitError` |
-| Lock contention | 75 (`TEMPFAIL`) | `Hive::ConcurrentRunError` |
-| Invalid dependency admission | 78 (`CONFIG`) | `Hive::DependencyAdmissionError` |
-| Internal error | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
 ## Backlinks
 

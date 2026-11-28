@@ -7,17 +7,11 @@ updated: 2026-11-07
 tags: [command, remote, context]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-context) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 `hive context` manages this client's installation targets without requiring a
 local runtime database or discovering a project. An unconfigured client uses
 `local`; `--context NAME` overrides the saved selection for one invocation.
-
-```sh
-hive context add nas --url https://hive.example --token-stdin
-hive context list
-hive context show nas --json
-hive context use nas
-hive --context local version
-```
 
 Add reads a single bearer from bounded stdin. Literal token options and extra
 arguments are rejected with fixed diagnostics that do not echo their values.

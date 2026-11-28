@@ -7,6 +7,8 @@ updated: 2026-11-15
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-daemon) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 Quota reset estimates are display-only hints. Operational status preserves the
 scheduler's actual hourly cooldown, next retry time, and safety decision rather
 than replacing them with a provider's later estimated reset date.
@@ -31,43 +33,26 @@ sweep; their disposition names the remedy and only a human retry admits them. Se
 fairly schedules ordinary patrol alongside language-neutral architecture
 discovery/action resumes.
 
-## Subcommands
+## Subsystem lifecycle architecture
 
 Managed service startup and daemon code-refresh re-exec explicitly select
 `--context local`, so a saved remote client context cannot interrupt the local
 daemon lifecycle. Installing an updated definition still follows the existing
 drift and `--force` rules.
 
-```
-hive daemon start [--detach] [--dry-run]
-hive daemon stop
-hive daemon status [--json]
-hive daemon quiesce [--timeout SECONDS] [--json]
-hive daemon resume [--timeout SECONDS] [--json]
-hive daemon reload
-hive daemon tail
-hive daemon install [--force]
-hive daemon enable  PROJECT | --all  [--json]
-hive daemon disable PROJECT | --all  [--json]
-hive daemon clear-hold PROJECT [SLUG]
-hive daemon queue   [list | show <id> | prune]  [--json]
-hive daemon --once PROJECT [--json] [--dry-run]
-```
-
-| Subcommand | Behavior |
-|-----------|----------|
-| `start`    | Takes the stable profile-wide daemon-activation lock before inspecting or replacing the PID file (`~/Dev/hive/.daemon.pid`) and retains it until the exact daemon generation publishes operational runtime readiness. A readiness publication failure exits without admitting the daemon. Without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. Both manual modes pin `HIVE_BIN` to the invoked `hive`/`hv` executable when the environment does not already provide an override, so status probes and dispatched children cannot drift to a different packaged Hive on `PATH`. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
-| `stop`     | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Ancillary children reaped during this drain are completed through their existing scheduler lifecycle before exit, so patrol and digest claims do not wait for lease expiry after a normal restart. Completion is fenced on a verified pre-signal descendant-tree snapshot plus the child's original process group: if either cannot be proven gone, the exit is withheld and the existing claim remains for lease recovery. Signal-derived nil exits count as failure, never success. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. With `--json`, emits a `hive-daemon-stop` envelope (fields: `running`, `was_running`, `stale_pid?`, `reason?` — `pid_reused` / `unverified` for safety bailouts). |
-| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with required producer-owned `runtime` identity, `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The separate `runtime_installation`, `lifecycle`, and advisory `quiescence_capability` objects report durable admission, generation, finalization-proof validity, and a bounded owned-process liveness verdict. A durable paused candidate is reported as `quiescing` if its proof is missing/stale, any retained identity is alive or unverifiable, or current custody is ineligible. Status remains available across schema skew and never migrates, reconciles, signals, registers itself, or runs startup housekeeping. The daemon records its runtime in the ownership-checked PID file at startup; status never stamps the observing CLI's identity onto another process, and reports `unknown` for a legacy or unavailable producer. The JSON envelope is produced by `Hive::Daemon::StatusReport`, which also feeds the web dashboard, and reports `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, `unreadable`, or `not_applicable`). An explicit runtime `HIVE_BIN` is the expected-binary authority before PATH lookup, so a managed web process cannot mistake its private gem wrapper for the daemon binary. Path comparison follows filesystem identity, so a stable service symlink that targets the expected deployment reports `none`; a symlink targeting another deployment still reports `path`. The producer is observation-only and skips update-state temporary-file cleanup. |
-| `quiesce` | Uses one fixed-default 600-second deadline (or a finite positive `--timeout`) from command entry, including database opening and accumulated fence/SQLite waits, to apply the read-only ownership precheck, close installation-wide admission, drain and stop owned work, reconcile verified interruption, checkpoint SQLite, and publish the generation-bound proof. Only a verified `paused: true` `hive-daemon-quiesce.v1` response exits 0. Busy, timeout, and ownership-unverifiable results exit 75. A precheck refusal while admission is still open is non-disruptive and carries no resume obligation; every non-paused response with admission provably closed includes `resume_required: true` and `resume_command: "hive daemon resume"`. Retrying quiesce continues the same closed generation, rebinding its monotonic clock after a host reboot without reopening admission. |
-| `resume` | Removes the old proof before its first database mutation and reconciles process, reservation, and interrupted-attempt evidence under the launch and writer fences while admission remains closed. Only successful reconciliation enters `resuming` and reopens the same generation; an incomplete attempt remains `quiescing` or `paused` so quiesce or resume can be retried. Managed services are restored afterward through their normal start adapters within the same deadline. `hive-daemon-resume.v1` reports `admission_reopened` separately from per-service outcomes, so a service-start failure cannot falsely claim admission stayed closed. With `--json`, each refusal emits one lifecycle error envelope. Busy, incomplete, and deadline results exit 75; schema skew exits 78 and directs the operator to the supervised `QuiescenceUpgrade` procedure before retrying explicit resume. |
-| `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. The daemon validates the daemon/update/answer-digest blocks and constructs the replacement healer before replacing live config, so a late loader failure cannot split the advertised retry switch from healer behavior. Reloaded concurrency limits (`max_concurrent_runs`, `max_concurrent_per_project`, `max_runs_per_day_per_project`, and `max_concurrent_patrol_scans`) are applied in place to the existing controller so active-child accounting, cooldowns, quarantine, daily counters, and dispatch baselines survive while new dispatch decisions use the new limits immediately. The structured `config_reloaded` daemon-log event reports all four effective limits for machine verification. Invalid numeric settings, including explicit YAML `null`, fail validation and leave the live limits unchanged. Exit 1 if no daemon running. With `--json`, emits a `hive-daemon-reload` envelope (`ok`, `reason`, `pid`, `message`). |
-| `tail`     | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
-| `install`  | Installs and starts the platform-native daemon service. The adapter owns template rendering, stable wrapper resolution, the 900-second restart warning, command wording, and the `hive-daemon-install.v1` JSON envelope. It preserves operator drift unless `--force` is supplied; exit `64` means unauthorized drift and exit `70` means no safe endpoint was proven. A conclusively absent manager retains the compatible filesystem-only `unsupported` success. Setup installs this global infrastructure independently of project enrollment. Shared locking, backup, replay, and recovery behavior is owned by [[modules/user_service]]. |
-| `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
-| `disable`  | Same shape as `enable`, sets `daemon.enabled: false`. The next dispatcher tick honours the change automatically (per-tick enable-cache invalidation); `hive daemon reload` is optional for instant pickup. |
-| `clear-hold` | Clears one restart-safe dispatch hold after the underlying configuration or task problem is fixed. With only `PROJECT`, it clears that project's dropped-project hold. With `PROJECT SLUG`, it clears only that task quarantine; cooldowns, transient-failure counters, other quarantines, and other projects remain unchanged. Stop the daemon first so its in-memory controller cannot restore stale hold state; the command refuses while any daemon PID file remains, including a stale file that `hive daemon stop` has not cleaned. The activation lock serializes the check against a concurrent daemon start, and the project-execution guard serializes checkpoint mutation against one-shot controllers. Repeating a clear with no matching hold is a successful no-op. This surface is text-only and rejects `--all`, `--json`, `--dry-run`, and `--detach`. |
-| `queue`    | Read-only inspection of the dispatch-request rows all adapters write and the daemon consumes. Runtime SQL uses only `hive-dispatch-request.v5`; the irreversible fleet cutover discards pending legacy file queues rather than upgrading them. V5 binds recovery to canonical task/stage/marker/generation identity, carries markerless provider-admission observations, and records `admitted`, `cleared`, `dispatched`, or `terminal` plus owner/remediation and terminal outcome/time. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. `list`/`show`/`prune` JSON uses the `hive-daemon-queue.v1` success or error arm; failures distinguish `unknown_action`, `missing_request_id`, and `internal`. |
+| Subsystem | Internal architecture |
+|-----------|-----------------------|
+| `start`    | Takes the stable profile-wide daemon-activation lock before inspecting or replacing the PID file (`~/Dev/hive/.daemon.pid`) and retains it until the exact daemon generation publishes operational runtime readiness. A readiness publication failure exits without admitting the daemon. `--detach` calls `Process.daemon(true, true)`. Both manual modes pin `HIVE_BIN` to the invoked `hive`/`hv` executable when unset so dispatched children cannot drift to a different packaged Hive on `PATH`. |
+| `stop`     | Sends `SIGTERM` to the PID file process, waits up to `daemon.shutdown_grace_sec` (default 600s), then escalates to `SIGKILL`. Ancillary children reaped during drain complete through their scheduler lifecycle before exit, fenced on a verified pre-signal descendant-tree snapshot plus original process group so unverified processes leave the claim for lease recovery. Signal-derived nil exits count as failure. |
+| `status`   | Produced by `Hive::Daemon::StatusReport` (shared with the web dashboard). Reads the ownership-checked PID file (never stamping the observing CLI's runtime identity onto another process), autostart service state, `runtime_installation`, `lifecycle`, advisory `quiescence_capability`, and `binary_drift` (following filesystem identity against `HIVE_BIN` before `PATH`). Remains available across schema skew and skips update-state temporary-file cleanup. |
+| `quiesce` | Uses one fixed-default 600-second deadline (or `--timeout`) from command entry across DB open, fences, and SQLite waits to run the read-only ownership precheck, close installation-wide admission, drain/stop owned work, reconcile verified interruption, checkpoint SQLite, and publish the generation-bound proof. Retrying quiesce continues the same closed generation, rebinding its monotonic clock after a host reboot without reopening admission. |
+| `resume` | Removes the old proof before its first database mutation and reconciles process, reservation, and interrupted-attempt evidence under launch and writer fences while admission remains closed. Only successful reconciliation enters `resuming` and reopens the same generation; managed services are restored afterward through their normal start adapters within the same deadline. Schema skew directs the operator to the supervised `QuiescenceUpgrade` procedure. |
+| `reload`   | Sends `SIGHUP` to trigger config reload at the next tick boundary without interrupting in-flight children. Validates daemon/update/answer-digest blocks and builds the replacement healer before swapping live config; applies reloaded concurrency limits (`max_concurrent_runs`, `max_concurrent_per_project`, `max_runs_per_day_per_project`, `max_concurrent_patrol_scans`) in place so accounting/cooldowns/quarantines survive, and logs `config_reloaded`. |
+| `tail`     | Self-implemented `tail -F` loop over `~/Dev/hive/logs/daemon.log` without shelling out to `tail`. |
+| `install`  | Thin adapter over [[modules/user_service]] owning template rendering, stable wrapper resolution, and the 900-second restart warning; setup installs this global infrastructure independently of project enrollment. |
+| `enable` / `disable` | Surgical line-level YAML editor updating `daemon.enabled` in `<project>/.hive-state/config.yml`, preserving comments, key order, and file mode bits while rejecting inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write uses tempfile + `flock(LOCK_EX)` + `fsync` + rename with `preflight_targets` validating all targets first; dispatcher ticks invalidate enable-cache per tick. |
+| `clear-hold` | Clears persisted project-drop holds or task quarantines under the activation lock (serialized against concurrent daemon start) and project-execution guard (serialized against one-shot controllers), refusing while any daemon PID file remains. |
+| `queue`    | Reads and prunes runtime SQL `hive-dispatch-request.v5` rows binding recovery to canonical task/stage/marker/generation identity and recording `admitted`, `cleared`, `dispatched`, or `terminal`. Nonterminal recovery requests do not expire or generic-prune; terminal receipts remain available for bounded replay. |
 
 ## Increment-1 quiescence boundary
 
@@ -502,61 +487,6 @@ outcomes all use registered event names.
   marker (e.g., delete `<!-- EXECUTE_COMPLETE -->`) so the row no
   longer classifies as advance-ready. Daemon will skip until you write
   the marker back.
-
-## JSON schemas
-
-Every public daemon JSON contract is version 1:
-
-| Surface | Schema |
-|---|---|
-| `status --json` | `hive-daemon-status.v1` |
-| `quiesce --json` | `hive-daemon-quiesce.v1` |
-| `resume --json` | `hive-daemon-resume.v1` |
-| `stop --json` | `hive-daemon-stop.v1` |
-| `reload --json` | `hive-daemon-reload.v1` |
-| `install --json` | `hive-daemon-install.v1` |
-| `enable --json`, `disable --json` | `hive-daemon-enroll.v1` |
-| `queue ... --json` | `hive-daemon-queue.v1` |
-
-If command-level error-envelope encoding raises `JSON::GeneratorError`, the
-daemon warns on stderr, emits no substitute document, and re-raises the
-original typed failure.
-
-## Exit codes
-
-| Subcommand | Code | Condition |
-|------------|------|-----------|
-| `start`    | 0    | (foreground daemon exited cleanly) |
-| `start`    | 75   | Another daemon already running (TEMPFAIL) |
-| `stop`     | 0    | Always (idempotent) |
-| `status`   | 0    | Daemon is running |
-| `status`   | 1    | Daemon is not running |
-| `quiesce`  | 0    | Verified paused acknowledgement |
-| `quiesce`  | 75   | Busy, timed out, or ownership unverifiable |
-| `quiesce`  | 70 / 78 | Storage failure / schema upgrade required |
-| `resume`   | 0    | Reconciliation completed and admission reopened |
-| `resume`   | 75   | Busy, timed out, or reconciliation incomplete |
-| `resume`   | 70 / 78 | Storage failure / supervised schema upgrade required |
-| `reload`   | 0    | SIGHUP sent successfully |
-| `reload`   | 1    | Daemon is not running |
-| `tail`     | 0    | Stream ended via Ctrl-C |
-| `tail`     | 1    | Log file does not exist |
-| `install`  | 0    | Installed, upgraded, unchanged, or written on a host without a usable user service manager |
-| `install`  | 64   | Existing unit requires `--force`, or invalid arguments (USAGE) |
-| `install`  | 70   | Service-manager or internal installation failure (SOFTWARE) |
-| `enable` / `disable` | 0 | Every selected project was updated successfully |
-| `enable` / `disable` | 64 | Missing, unknown, conflicting, or uninitialised project selection (USAGE) |
-| `enable` / `disable` | 70 | Unexpected internal failure (SOFTWARE) |
-| `enable` / `disable` | 78 | Malformed project/global configuration (CONFIG) |
-| `clear-hold` | 0 | Named hold cleared, or no matching hold existed |
-| `clear-hold` | 64 | Missing/unknown project, too many arguments, or an unsupported mode flag (USAGE) |
-| `clear-hold` | 75 | A daemon PID file still exists; stop/clean it before clearing persisted state (TEMPFAIL) |
-| `queue list` / `queue prune` | 0 | Always (lists / prunes; empty is still success) |
-| `queue show <id>` | 0 | Request found |
-| `queue show <id>` | 1 | Request not found (GENERIC) |
-| `queue` (any)     | 64 | Unknown queue action, or `show` with a missing REQUEST_ID (USAGE) |
-| `queue` (any)     | 70 | Internal IO/parse error (SOFTWARE) — wrapped so the exit code matches the `--json` envelope's `error_kind:"internal"` (#262) |
-| (any)      | 64   | Unknown subcommand |
 
 ## Backlinks
 

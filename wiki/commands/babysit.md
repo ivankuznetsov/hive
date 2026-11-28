@@ -7,31 +7,16 @@ updated: 2026-11-27
 tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-babysit) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive babysit` manages the experimental PR babysitter. It is a separate process from `hive daemon`: it polls open PRs for projects with `babysitter.enabled: true`, skips ignored labels, and asks the configured development agent to repair conflicts or red CI in an isolated PR worktree.
 
-## Usage
+## Service and one-shot architecture
 
-```bash
-hive babysit start [--detach] [--dry-run]
-hive babysit stop
-hive babysit restart [--detach] [--dry-run]
-hive babysit status
-hive babysit reload
-hive babysit tail
-hive babysit install [--force]
-hive babysit --once PROJECT [--dry-run]
-hive babysit --once --all [--dry-run]
-```
-
-Service lifecycle subcommands remain human-readable. Every `--once` invocation
-emits exactly one `hive-one-shot.v1` document, with or without an explicit
-`--json`, including `--all` when no project is enabled.
-The one-shot adapter loads at the adapter construction boundary, so direct
-command-adapter callers do not depend on an earlier `run_once` call.
-
-The one-shot babysitter adapter is loaded with the command itself, so direct
-one-shot construction and the normal command execution path use the same
-adapter and persistent-admission predicate.
+The one-shot babysitter adapter loads at the adapter construction boundary with
+the command itself, so direct command-adapter construction and the normal
+command execution path share the same adapter and persistent-admission
+predicate.
 
 `install` writes and starts the supervised per-user service through
 `Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
@@ -251,15 +236,6 @@ Existing skip logs must already be private: both the pre-open and post-open
 checks reject any file with group or world permission bits. The blocked command
 still returns synthetic success and emits the stderr marker plus an audit-write
 warning, but the permissive file is left untouched and receives no new argv.
-
-## Output, errors, serialization, and exit codes
-
-Service lifecycle subcommands remain human-readable. Every `--once` operation
-emits exactly one `hive-one-shot.v1` JSON document, including usage,
-configuration, ownership, observation, and adapter-construction failures.
-Successful lifecycle and one-shot operations exit `0`; failed one-shot reports
-use their typed exit code, ordinary lifecycle failures exit `1`, invalid
-command shapes exit `64`, and software failures exit `70`.
 
 ## Tests
 

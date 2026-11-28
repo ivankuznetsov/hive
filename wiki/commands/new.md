@@ -7,15 +7,11 @@ updated: 2026-11-19
 tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-new) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, resolves the effective workflow (`--workflow` override, project `default_workflow`, then `coding`), scaffolds the descriptor's entry-stage folder plus state file and `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
 
-## Usage
-
-```
-hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on TASK]... [--idempotency-key KEY] [--json] TEXT...
-```
-
-`PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
+## Capture, dependency policy, and TUI composer internals
 
 Both ordinary default-workflow resolution and managed-workflow configuration
 loading preserve `UnsupportedProjectConfigError` as a configuration failure
@@ -31,8 +27,7 @@ flat array, and a singleton array remains an array rather than silently
 becoming a scalar.
 
 To add, replace, or remove the dependency after capture, at any unfinished
-stage, use [[commands/stack]] (`hive stack TARGET --on REF` / `--clear`); it
-takes the same grammar and writes the same `meta.yml` field.
+stage, use [[commands/stack]]; it takes the same grammar and writes the same `meta.yml` field.
 
 Declaration shape is policy. One scalar keeps same-project branch stacking and
 the project's configured dependency gate. Adding a second flag changes the
@@ -52,37 +47,14 @@ omitted for such a workflow, Hive records the project's configured Git default
 branch (or Git's detected default when configuration is blank). Other workflows
 reject `--base`, and draft-PR workflows reject `--depends-on` stacking in v1.
 
-The executable wrapper lifts standalone allow-listed `new` options from anywhere
-outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`, `--base BRANCH`,
-`--base=BRANCH`,
-repeated `--depends-on VALUE` / `--depends-on=VALUE`, and Thor-style JSON
-booleans. The
-first remaining positional is `PROJECT`; the rest remains literal task text
-behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
-`hive new PROJECT --workflow my-flow "<your idea>"` pins the task instead of
-capturing `--workflow my-flow` in `idea.md`. `--json` is lifted too and turns
-stdout into one `hive-new.v1` document (see [JSON output](#json-output)).
+`Hive::CliArgvPolicy.lift_new_options` lifts only the closed allow-list of
+`new` options (`--workflow`, `--base`, `--depends-on`, `--idempotency-key`,
+`--context`, and Thor-style JSON booleans) ahead of `--`, keeping the remaining
+task prose literal. When `Hive::TaskCounter.next_or_nil` allocates an id, the
+next-step hint uses that numeric id; if the runtime control plane is
+unavailable, capture still succeeds and the hint falls back to the task path.
 
-Only the closed allow-list is lifted. `hive new PROJECT add --help docs`
-captures `add --help docs` instead of rendering help,
-`hive new PROJECT literal --json=yes text` captures the malformed-looking JSON
-assignment literally instead of failing the wrapper boolean grammar, and
-`hive new PROJECT --foo idea` captures `--foo idea` rather than treating `--foo`
-as a command option. A `--workflow` substring inside one quoted argv element
-also remains literal task text.
-
-Without `--json`, the human stdout surface is plain text:
-
-```
-hive: captured <task>/idea.md
-next: mv <task> <hive-state>/stages/<next-stage>/ && hive run <id-or-task>
-```
-
-When `Hive::TaskCounter.next_or_nil` allocates an id, the final token in the
-next-step hint is that numeric id. If the runtime control plane is unavailable,
-capture still succeeds and the hint falls back to the task path.
-
-The CLI argv surface is unchanged. Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [[abs_path, dest_name], …])` also supports the TUI rich composer (the `attachments:` argument is an array of `[src_abs_path, dest_filename]` tuples, not a flat array of paths):
+Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [[abs_path, dest_name], …])` also supports the TUI rich composer (the `attachments:` argument is an array of `[src_abs_path, dest_filename]` tuples, not a flat array of paths):
 
 - `call!` performs the capture without calling `exit`, raising typed `ProjectNotFound`, `InvalidSlugError`, or `SlugCollisionError` for TUI callers.
 - `body_override:` replaces the markdown body while frontmatter `original_text:` and slug derivation still use `text`.
@@ -240,50 +212,6 @@ creation-only workflow authoring never invokes `hive new`.
 The internal structured adapter also records `task_id` in its original durable
 result. This lets the remote API acknowledge the captured native task without
 reopening an old folder after advancement. Local CLI JSON does not carry it.
-
-## JSON output
-
-`hive new ... --json` prints exactly one `hive-new.v1` document on stdout, on
-success and on every failure, with or without `--idempotency-key`. Before
-2026-11-19 an unkeyed `--json` printed the human `hive: captured` / `next:`
-lines instead. An agent could not parse them, assumed the create had failed,
-and retried into a duplicate task. Read `ok` and `created`. Use
-`--idempotency-key` whenever a caller may retry, because only a key makes a
-retry return the original task.
-
-Every failure path is covered:
-
-- Empty task text is checked inside `New#call`, so it is an error document
-  (`message: "missing task text"`, exit 1) rather than a launcher stderr line.
-- Thor rejections before dispatch (for example `hive new --json` with no
-  PROJECT) use the `new` usage contract that `lib/hive/commands/new.rb`
-  declares: `hive-new`, `error_kind: "usage"`, exit 64.
-- Stderr carries the multi-`--depends-on` notice, the receipt fallback notice,
-  and the `hive: context=local ...` banner. A failure inside the command adds
-  no stderr line in JSON mode. A pre-dispatch Thor rejection also prints
-  `hive: <message>` on stderr.
-- Keyed intake that is disabled (`command_intake_disabled`) was already a
-  `hive-new.v1` error document and is unchanged.
-
-The schema is unchanged; only which invocations emit it changed.
-
-## Serialization fallback
-
-The shared envelope emitter wraps success-serialization failures as internal
-errors. If encoding the error envelope also raises `JSON::GeneratorError`, the command
-re-raises that encoding error and emits no fallback document. Programmatic
-`call!` callers receive exceptions.
-
-## Exit codes
-
-| Code | Meaning |
-|---:|---|
-| 0 | The task was created, or an idempotency-key replay returned its existing task (receipt replay or per-project fallback). |
-| 1 | A generic project, slug, collision, filesystem, or I/O failure occurred. |
-| 64 | Arguments, workflow selection, base/dependency shape, or draft-PR combination were invalid. |
-| 70 | An internal software boundary failed. |
-| 75 | A task-capture or commit lock was busy. |
-| 78 | Project or managed-workflow configuration was invalid. |
 
 ## Backlinks
 

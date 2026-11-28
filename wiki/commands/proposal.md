@@ -7,6 +7,8 @@ updated: 2026-11-09
 tags: [command, proposals, skills, workflows, evidence]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-proposal) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive proposal` submits and evaluates task-bound skill/workflow
 candidates, exposes live canonical history, records authority-gated lifecycle
 facts, and refreshes deterministic wiki views. Every mutation is tracking-only.

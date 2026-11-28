@@ -7,37 +7,9 @@ updated: 2026-09-26
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
+> **Public CLI authority:** See [docs/cli.md](../../docs/cli.md#hive-workflow) for canonical invocation syntax, options, JSON schemas, context rules, and exit codes. This page documents internal implementation, storage, and architecture.
+
 **TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations. `publish` locally builds and validates immutable Honeycomb v1 package bytes, binds a confirmed release digest to one recoverable non-draft review PR, and reconciles its PR/catalogue lifecycle without adding a public status command.
-
-## Usage
-
-```bash
-hive workflow new my-flow
-hive workflow new my-flow --template research
-hive workflow new my-flow --json
-hive workflow validate my-flow --json
-hive workflow commit my-flow
-hive workflow install honeycomb/repo-brief
-hive workflow install honeycomb/repo-brief \
-  --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
-  --input-binding GSC_TOKEN=PRODUCTION_GSC_TOKEN
-hive workflow install honeycomb/repo-brief --dry-run --json
-hive workflow list --json
-hive workflow update repo-brief --dry-run --json
-hive workflow update repo-brief --yes --allow-escalation
-hive workflow remove repo-brief --yes
-hive workflow remove repo-brief --dry-run --json
-hive workflow publish my-flow --version 1.0.0 --dry-run --json
-hive workflow publish my-flow --version 1.0.0 \
-  --expected-release-digest <confirmed-release-digest> --json
-```
-
-## Usage and examples: decide
-
-`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT]
-[--json]` records one waiting human-stage decision. For example,
-`hive decide demo:task approve --from research --decision-id visit-7 --json`
-accepts only the current visit-specific identifier returned by `hive run`.
 
 ## Private and direct Git sources
 
@@ -335,19 +307,6 @@ pathspecs under the commit lock before removing the generated files.
 Workflow JSON success and error documents are encoded directly. A
 `JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
 it propagates from the owning subcommand.
-
-## Serialization fallback
-
-Workflow and decide success/error documents are encoded directly. If
-`JSON.generate` raises `JSON::GeneratorError`, Hive emits no prose or fallback
-JSON document and lets that serialization failure propagate.
-
-## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
-
-| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
-|---|---|---|---|---|---|---|
-| `hive workflow` | Options: subcommand-specific authoring, lifecycle, validation, consent, mapping, publication, and `--json` flags described above. | Scaffolds/validates project workflows or manages reviewed Honeycomb generations and publication review. | JSON schemas are `hive-workflow-new.v1`, `hive-workflow-install.v2`, `hive-workflow-list.v2`, `hive-workflow-remove.v1`, `hive-workflow-update.v2`, `hive-workflow-publish.v2`, and `hive-workflow-validate.v1`. | Usage, consent, configuration, Git, validation, and lifecycle failures use the selected subcommand error surface. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes include `0`, `64`, `70`, `75`, `78`, plus a selected typed Hive failure code. |
-| `hive decide` | Options: required `--from` and `--decision-id`, with optional `--note` and `--json`. | Applies or idempotently replays one current human-stage outcome and rejects stale/conflicting decisions. | JSON schema `hive-decide.v1`. | Invalid paths/outcomes, stale decisions, lock contention, configuration, and write failures use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes include `0`, `64`, `70`, `75`, `78`, plus a selected typed Hive failure code. |
 
 ## Backlinks
 

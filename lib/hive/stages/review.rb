@@ -173,6 +173,36 @@ module Hive
         @grant_budget = nil
         @granted_fix_context = nil
         @granted_fix_started = false
+        @internal_pr_snapshot = nil
+
+        # U6.2 / U6.3: Fence Review BEFORE budget/resume, marker, or settled-PR
+        # shortcuts. Check MANUAL_STEERING hold under the lease and bind an
+        # applicable internal PR review to one coherent U2 snapshot.
+        initial_marker = Hive::Markers.current(task.state_file)
+        if initial_marker.name == :manual_steering
+          warn "hive: MANUAL_STEERING is active; automated review skipped"
+          return { commit: nil, status: :manual_steering }
+        end
+
+        require "hive/internal_pr_checkout"
+        if Hive::InternalPrCheckout.applicable?(task)
+          snap = Hive::InternalPrCheckout.read_only_snapshot(task, config: cfg)
+          unless snap.coherent?
+            require "hive/attempts/contracts"
+            rec = snap.to_reconciliation_result(task: task)
+            if snap.busy? || snap.retryable
+              raise Hive::Attempts::ReconciliationBusy.new(
+                "internal PR checkout snapshot unavailable (#{snap.reason}): #{snap.guidance}",
+                reconciliation: rec
+              )
+            end
+            raise Hive::Attempts::ReconciliationBlocked.new(
+              "internal PR checkout snapshot blocked (#{snap.reason}): #{snap.guidance}",
+              reconciliation: rec
+            )
+          end
+          @internal_pr_snapshot = snap
+        end
 
         budget_snapshot = nil
         candidate_budget = review_budget_for(task)
@@ -1128,6 +1158,8 @@ module Hive
       end
 
       def publish_review_head(task:, cfg:, ctx:)
+        require "hive/internal_pr_checkout"
+        return nil if Hive::InternalPrCheckout.applicable?(task)
         return nil unless adhoc_fix_enabled?(cfg, task)
         pr_path = File.join(task.folder, "pr.md")
         return nil unless File.file?(pr_path)
@@ -1234,9 +1266,115 @@ module Hive
       # PR reopened resumes review normally; no observation keeps the
       # pre-existing behavior.
       def settled_pull_request_result(task)
+        require "hive/internal_pr_checkout"
+        if Hive::InternalPrCheckout.applicable?(task)
+          return settled_internal_pr_result(task)
+        end
+
         outcome = Hive::PullRequestOutcome.latest(task.folder)
         return nil unless outcome&.settled?
 
+        format_settled_pr_outcome(task, outcome)
+      end
+
+      def settled_internal_pr_result(task)
+        snap = @internal_pr_snapshot
+        if snap.nil? || !snap.coherent?
+          snap = Hive::InternalPrCheckout.read_only_snapshot(task)
+          unless snap.coherent?
+            require "hive/attempts/contracts"
+            rec = snap.to_reconciliation_result(task: task)
+            if snap.busy? || snap.retryable
+              raise Hive::Attempts::ReconciliationBusy.new(
+                "internal PR checkout state unavailable (#{snap.reason}): #{snap.guidance}",
+                reconciliation: rec
+              )
+            end
+            raise Hive::Attempts::ReconciliationBlocked.new(
+              "internal PR checkout state blocked (#{snap.reason}): #{snap.guidance}",
+              reconciliation: rec
+            )
+          end
+        end
+
+        pr_url = snap.identity.pr_url
+        reviewed_oid = snap.reviewed_oid
+        generation = snap.generation
+
+        # Precedence (U6.2):
+        # 1. Explicit reopen's bound observation (passed via Run or Attempts::Context)
+        # 2. Confirmed snapshot observation from U2's store / pr.md
+        # 3. Any newer locally recorded watcher observation bound to the same
+        #    PR, head OID, and generation supersedes earlier open evidence.
+        # Older URL-only PullRequestOutcome.latest entries are ignored.
+        bound_obs = matching_internal_pr_observation(
+          Hive::InternalPrCheckout.current_pr_observation ||
+            (defined?(Hive::Attempts::Context) ? Hive::Attempts::Context.current&.pr_observation : nil),
+          pr_url: pr_url, head_oid: reviewed_oid, generation: generation
+        ) || matching_internal_pr_observation(
+          snap.pr_observation,
+          pr_url: pr_url, head_oid: reviewed_oid, generation: generation
+        )
+
+        watcher_obs = Hive::PullRequestOutcome.latest_for_generation(
+          task.folder,
+          pr_url: pr_url,
+          head_oid: reviewed_oid,
+          generation: generation,
+          after: bound_obs&.dig("observed_at")
+        )
+
+        effective_state = if watcher_obs
+          watcher_obs.state
+        elsif bound_obs
+          Hive::PullRequestOutcome::STATES[bound_obs["state"].to_s.downcase]
+        end
+
+        unless effective_state
+          require "hive/attempts/contracts"
+          rec = Hive::InternalPrCheckout::Result.new(
+            status: "blocked",
+            reason: "remote_observation_required",
+            retryable: true,
+            task_slug: snap.identity.task_slug,
+            task_id: snap.identity.task_id,
+            pr_number: snap.identity.pr_number,
+            pr_url: pr_url,
+            generation: generation,
+            head_oid: reviewed_oid,
+            candidate_oid: snap.candidate_oid,
+            guidance: "fresh provider observation is required for PR ##{snap.identity.pr_number} at head #{reviewed_oid[0, 12]}"
+          )
+          raise Hive::Attempts::ReconciliationBusy.new(
+            "internal PR review requires fresh PR observation (#{rec.guidance})",
+            reconciliation: rec
+          )
+        end
+
+        outcome = Hive::PullRequestOutcome::Observation.new(state: effective_state, pr_url: pr_url)
+        return nil unless outcome.settled?
+
+        format_settled_pr_outcome(task, outcome)
+      end
+
+      def matching_internal_pr_observation(obs, pr_url:, head_oid:, generation:)
+        return nil unless obs.is_a?(Hash)
+
+        obs_url = Hive::PullRequestOutcome.canonical_url(obs["pr_url"] || obs["url"])
+        obs_oid = (obs["head_oid"] || obs["head_ref_oid"]).to_s.downcase
+        return nil unless obs_url == pr_url && obs_oid == head_oid
+
+        if obs.key?("generation") && !obs["generation"].nil? && generation
+          return nil unless obs["generation"].to_i == generation.to_i
+        end
+
+        state = Hive::PullRequestOutcome::STATES[obs["state"].to_s.downcase]
+        return nil unless state
+
+        obs
+      end
+
+      def format_settled_pr_outcome(task, outcome)
         if outcome.merged?
           warn "hive: #{outcome.pr_url} is merged; review agents will not run. If Hive does not archive it, run " \
                "`hive archive #{task.slug} --reason already_delivered --evidence #{outcome.pr_url}`"

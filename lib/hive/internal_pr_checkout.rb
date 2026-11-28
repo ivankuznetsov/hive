@@ -27,12 +27,37 @@ module Hive
       :head_transition_digest,
       :pr_observation,
       :lease_version,
-      :sampled_value
+      :sampled_value,
+      :details
     ) do
+      def initialize(details: nil, **fields)
+        super(details: details, **fields)
+      end
+
       def applicable? = applicable == true
       def coherent? = status == "current"
       def busy? = status == "busy"
       def blocked? = status == "blocked"
+
+      def to_reconciliation_result(task: nil)
+        extra = details.is_a?(Hash) ? details : {}
+        Result.new(
+          status: status,
+          reason: reason,
+          retryable: retryable,
+          task_slug: identity&.task_slug || extra["task_slug"] || (task&.respond_to?(:slug) ? task.slug : nil),
+          task_id: identity&.task_id || extra["task_id"] || (task&.respond_to?(:id) ? task.id : nil),
+          pr_number: identity&.pr_number || extra["pr_number"],
+          pr_url: identity&.pr_url || extra["pr_url"],
+          generation: generation,
+          head_oid: reviewed_oid,
+          candidate_oid: candidate_oid,
+          checkout_digest: head_transition_digest,
+          transaction_id: current&.dig("transaction_id") || extra["transaction_id"],
+          pr_observation: pr_observation,
+          guidance: guidance
+        )
+      end
     end
 
     module_function
@@ -285,7 +310,14 @@ module Hive
         head_transition_digest: nil,
         pr_observation: nil,
         lease_version: nil,
-        sampled_value: nil
+        sampled_value: nil,
+        details: {
+          "transaction_id" => pending["transaction_id"],
+          "pr_number" => pending["pr_number"],
+          "pr_url" => pending["pr_url"],
+          "task_slug" => pending["task_slug"],
+          "task_id" => pending["task_id"]
+        }
       )
     rescue Error => e
       Snapshot.new(

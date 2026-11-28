@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "hive/atomic_file"
+require "hive/errors"
 
 module Hive
   module Stages

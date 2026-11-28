@@ -523,4 +523,208 @@ class ReviewGithubPublisherTest < Minitest::Test
                       "secret short-circuit must NOT invoke `gh pr comment`"
     end
   end
+
+  def test_validated_internal_pr_url_accepts_feature_branch_and_fork_and_rejects_mismatches
+    require "hive/internal_pr_checkout"
+    with_tmp_dir do |dir|
+      head_oid = "a" * 40
+      task = make_internal_pr_task(dir, pr_number: 42, head_oid: head_oid)
+      identity = Hive::InternalPrCheckout::Identity.resolve!(task)
+
+      view_meta = Hive::Gh::PrMetadata.new(
+        number: 42,
+        url: "https://github.com/acme/app/pull/42",
+        base_ref_name: "main",
+        head_ref_name: "alice/fix-login-completely-different-branch",
+        head_ref_oid: head_oid,
+        head_repository: "acme/app",
+        is_cross_repository: false,
+        state: "OPEN",
+        is_draft: false
+      )
+
+      test_case = self
+      with_replaced_singleton_method(
+        Hive::Worktree, :read_owned_pointer,
+        ->(*_args, **kwargs) do
+          test_case.assert_equal "hive/review/pr-42", kwargs[:expected_branch]
+          { "path" => identity.expected_worktree_path, "branch" => "hive/review/pr-42" }
+        end
+      ) do
+        with_replaced_singleton_method(
+          Hive::Gh, :repository_identity,
+          ->(*_args, **_kwargs) { { "host" => "github.com", "repository" => "acme/app" } }
+        ) do
+          with_replaced_singleton_method(Hive::Gh, :validated_pr_metadata, ->(*_args, **_kwargs) { view_meta }) do
+            assert_equal "https://github.com/acme/app/pull/42",
+                         Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg),
+                         "differently named remote feature branch must be valid"
+
+            # Fork PR matching stored cross-repo metadata
+            fork_task = make_internal_pr_task(
+              dir, pr_number: 43, head_oid: head_oid,
+                   is_cross_repository: true, head_repository: "fork-owner/app"
+            )
+            fork_identity = Hive::InternalPrCheckout::Identity.resolve!(fork_task)
+            view_meta = Hive::Gh::PrMetadata.new(
+              number: 43,
+              url: "https://github.com/acme/app/pull/43",
+              base_ref_name: "main",
+              head_ref_name: "patch-1",
+              head_ref_oid: head_oid,
+              head_repository: "fork-owner/app",
+              is_cross_repository: true,
+              state: "OPEN",
+              is_draft: false
+            )
+            with_replaced_singleton_method(
+              Hive::Worktree, :read_owned_pointer,
+              ->(*_args, **kwargs) do
+                test_case.assert_equal "hive/review/pr-43", kwargs[:expected_branch]
+                { "path" => fork_identity.expected_worktree_path, "branch" => "hive/review/pr-43" }
+              end
+            ) do
+              assert_equal "https://github.com/acme/app/pull/43",
+                           Hive::Stages::Review::GithubPublisher.validated_pr_url(fork_task, cfg),
+                           "fork PR matching canonical head_repository must be valid"
+
+              # Mismatched fork identity -> nil
+              view_meta = view_meta.with(head_repository: "other-fork/app")
+              assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(fork_task, cfg)
+            end
+
+            # Mismatched number, URL, head OID, or repository -> nil
+            base_meta = Hive::Gh::PrMetadata.new(
+              number: 42,
+              url: "https://github.com/acme/app/pull/42",
+              base_ref_name: "main",
+              head_ref_name: "alice/fix-login",
+              head_ref_oid: head_oid,
+              head_repository: "acme/app",
+              is_cross_repository: false,
+              state: "OPEN",
+              is_draft: false
+            )
+            [
+              { number: 99 },
+              { url: "https://github.com/acme/app/pull/99" },
+              { url: "https://github.com/evil/other/pull/42" },
+              { head_ref_oid: "b" * 40 }
+            ].each do |bad|
+              view_meta = base_meta.with(**bad)
+              assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg),
+                         "mismatched #{bad.keys.join(',')} must return nil"
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_internal_pr_review_publish_and_fix_publication_are_strictly_local_only
+    require "hive/internal_pr_checkout"
+    require "hive/stages/review/publication"
+    with_tmp_dir do |dir|
+      head_oid = "a" * 40
+      task = make_internal_pr_task(dir, pr_number: 42, head_oid: head_oid)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] finding\n")
+
+      adhoc_fix_cfg = cfg(enabled: true).merge("review" => {
+        "github_publish" => { "enabled" => true, "max_attempts" => 1 },
+        "adhoc" => { "fix" => true }
+      })
+
+      comment_result = Hive::Stages::Review::GithubPublisher.publish!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: adhoc_fix_cfg
+      )
+      assert_equal :not_applicable, comment_result
+      refute File.exist?(File.join(@log_dir, "fake-gh-argv.log")),
+             "internal PR comment publish must invoke zero gh commands"
+
+      fail_gate = Object.new
+      fail_gate.define_singleton_method(:execute) { |*| flunk "push gate must never be called for internal PR review" }
+      fail_gh = Object.new
+      fail_gh.define_singleton_method(:capture3) { |*| flunk "gh must never be called for internal PR fix publication" }
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: dir, task_folder: task.folder, default_branch: "main", pass: 1
+      )
+      pub = Hive::Stages::Review::Publication.new(
+        task: task, cfg: adhoc_fix_cfg, ctx: ctx,
+        pr_url: "https://github.com/acme/app/pull/42",
+        gh: fail_gh, gate: fail_gate
+      )
+      pub.publish!(expected_head: head_oid)
+      assert_equal "not_applicable", pub.evidence["publication"]
+      assert_equal "not_applicable", pub.evidence["verification"]
+      refute File.exist?(File.join(task.folder, "github-publication.json")),
+             "internal PR fix publication must not write github-publication.json"
+    end
+  end
+
+  def test_ordinary_review_repush_adoption_posts_generation_two_and_dedupes_replay
+    require "hive/stages/review/pass_archive"
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] gen 1 finding\n")
+      assert_equal "### Reviewer: codex - Pass 01",
+                   Hive::Stages::Review::GithubPublisher.comment_header(task, "codex", 1)
+
+      Hive::Stages::Review::PassArchive.retire!(
+        task, label: "repush-ff-adoption", expiry_reason: "remote_fast_forward_adopted"
+      )
+      File.write(body, "- [ ] gen 2 finding\n")
+      assert_equal "### Reviewer: codex - Pass 01 (review generation 2)",
+                   Hive::Stages::Review::GithubPublisher.comment_header(task, "codex", 1)
+
+      ENV["HIVE_FAKE_GH_COMMENTS_BODY"] = "### Reviewer: codex - Pass 01\n\ngen 1 comment"
+      assert_equal :posted, publish_review!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+      )
+      log = File.read(File.join(@log_dir, "fake-gh-argv.log"))
+      assert_includes log, "### Reviewer: codex - Pass 01 (review generation 2)"
+
+      # Replay with gen 2 comment already present dedupes cleanly
+      FileUtils.rm_f(File.join(@log_dir, "fake-gh-argv.log"))
+      ENV["HIVE_FAKE_GH_COMMENTS_BODY"] = "### Reviewer: codex - Pass 01 (review generation 2)\n\ngen 2 comment"
+      assert_equal :already_posted, publish_review!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+      )
+      refute_includes File.read(File.join(@log_dir, "fake-gh-argv.log")), "arg=comment\n"
+    end
+  end
+
+  private
+
+  def make_internal_pr_task(dir, pr_number:, head_oid:, is_cross_repository: false, head_repository: "acme/app")
+    slug = Hive::InternalPrCheckout::Identity.slug_for(pr_number)
+    folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
+    FileUtils.mkdir_p(File.join(folder, "reviews"))
+    File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n\n# PR #{pr_number}\n")
+    File.write(File.join(folder, "pr.md"), <<~MD)
+      ---
+      source: ad-hoc
+      pr_number: #{pr_number}
+      pr_url: https://github.com/acme/app/pull/#{pr_number}
+      head_oid: #{head_oid}
+      base_ref_name: main
+      head_ref_name: feat
+      head_repository: #{head_repository}
+      is_cross_repository: #{is_cross_repository}
+      pr_state: OPEN
+      ---
+    MD
+    store = Hive::InternalPrCheckout::Store.new(folder)
+    store.initialize_generation_one!(
+      task_id: format("%04d", pr_number), task_slug: slug, project: File.basename(dir),
+      pr_host: "github.com", pr_repository: "acme/app", pr_number: pr_number,
+      pr_url: "https://github.com/acme/app/pull/#{pr_number}",
+      base_ref_name: "main", head_ref_name: "feat", head_repository: head_repository,
+      is_cross_repository: is_cross_repository, pr_state: "OPEN",
+      branch: Hive::InternalPrCheckout::Identity.branch_for(pr_number),
+      head_oid: head_oid, committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+    )
+    Hive::Task.new(folder)
+  end
 end

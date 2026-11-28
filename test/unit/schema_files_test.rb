@@ -3366,4 +3366,37 @@ class SchemaFilesTest < Minitest::Test
              "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
     end
   end
+
+  def test_hive_status_v9_declares_closed_internal_pr_reconciliation_without_changing_dependency_admission_mirrors
+    require "hive/internal_pr_checkout"
+    require "hive/dependency_admission"
+
+    status_doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    rec_def = status_doc.dig("$defs", "InternalPrReconciliation")
+    assert_kind_of Hash, rec_def
+    assert_equal false, rec_def.fetch("additionalProperties")
+    assert_equal Hive::InternalPrCheckout::STATUSES.sort,
+                 rec_def.dig("properties", "status", "enum").sort
+    assert_equal Hive::InternalPrCheckout::REASONS_BY_STATUS.values.flatten.sort,
+                 rec_def.dig("properties", "reason", "enum").sort
+    assert_equal "#/$defs/InternalPrReconciliation",
+                 status_doc.dig("$defs", "Task", "properties", "reconciliation", "$ref")
+
+    # Verify DependencyAdmission::REASON_CODES and its four schema mirrors remain untouched.
+    expected_codes = Hive::DependencyAdmission::REASON_CODES.sort
+    refute_includes expected_codes, "transition_interrupted"
+    refute_includes expected_codes, "pending_invalid"
+    {
+      "hive-status" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ],
+      "hive-run" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ],
+      "hive-approve" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ],
+      "hive-stage-action" => [ "$defs", "AdmissionError", "properties", "reason_code", "enum" ]
+    }.each do |schema_name, path|
+      doc = JSON.parse(File.read(Hive::Schemas.schema_path(schema_name)))
+      enum = doc.dig(*path)
+      next unless enum
+
+      assert_equal expected_codes, enum.sort, "#{schema_name} AdmissionError reason_code enum must stay intact"
+    end
+  end
 end

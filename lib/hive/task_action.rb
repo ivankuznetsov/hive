@@ -300,7 +300,8 @@ module Hive
       Hive::Schemas::TaskActionKind::PLAN_REVIEW_RETRY => "plan-review-run"
     ).freeze
 
-    attr_reader :task, :marker, :project_name, :projection, :patrol_fix
+    attr_reader :task, :marker, :project_name, :projection, :patrol_fix,
+                :internal_pr_reconciliation
 
     # Default grace window for placeholder AGENT_WORKING markers (no PID
     # attribute) before they classify as orphaned. Mirrors the daemon's
@@ -319,11 +320,9 @@ module Hive
                    pid_alive: nil, state_file_mtime: nil,
                    agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC,
                    live_task_lock: false, plan_review: PLAN_REVIEW_UNRESOLVED,
+                   internal_pr_snapshot: nil,
                    clock: -> { Time.now.utc })
       @task = task
-      @projection = projection || load_projection(marker)
-      @marker = projected_marker(@projection) || marker ||
-                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
       @config = config || { "conditions" => { "authority" => "markers", "stages" => {} } }
       @project_name = project_name
       @project_count = project_count
@@ -333,6 +332,14 @@ module Hive
       @agent_marker_grace_sec = agent_marker_grace_sec
       @live_task_lock = live_task_lock
       @clock = clock
+      @internal_pr_reconciliation = nil
+      @internal_pr_busy = false
+      sampled_marker, sampled_projection = sample_internal_pr_state(
+        marker, projection, pre_sampled: internal_pr_snapshot
+      )
+      @projection = sampled_projection || projection || load_projection(sampled_marker || marker)
+      @marker = projected_marker(@projection) || sampled_marker || marker ||
+                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
       @patrol_fix = load_patrol_fix
       @plan_review = plan_review.equal?(PLAN_REVIEW_UNRESOLVED) ?
         load_plan_review : plan_review
@@ -467,6 +474,8 @@ module Hive
       # marker-derived workflow advice; otherwise status can offer a
       # duplicate runnable command that immediately hits ConcurrentRunError.
       return ACTIONS.fetch(:agent_running) if @live_task_lock
+      return ACTIONS.fetch(:agent_running) if @internal_pr_busy
+      return ACTIONS.fetch(:error) if @internal_pr_reconciliation
 
       # `:agent_working` overrides every (stage, marker) pair — a live
       # agent run on the task pre-empts whatever workflow advice the
@@ -845,14 +854,89 @@ module Hive
     public
 
     def diagnostic
+      return internal_pr_reconciliation_diagnostic if @internal_pr_reconciliation
+
       diagnostic_builder.to_h
     end
 
     def next_action
+      return nil if @internal_pr_reconciliation
+
       diagnostic_builder.next_action
     end
 
     private
+
+    def sample_internal_pr_state(caller_marker, caller_projection, pre_sampled: nil)
+      return [ nil, nil ] if @live_task_lock
+      if pre_sampled
+        return apply_internal_pr_snapshot(pre_sampled, caller_marker, caller_projection, use_sampled_value: false)
+      end
+      return [ nil, nil ] unless task && task.respond_to?(:folder) && !task.folder.to_s.empty?
+
+      stage = task.respond_to?(:stage_name) ? task.stage_name.to_s : File.basename(File.dirname(task.folder.to_s))
+      return [ nil, nil ] unless %w[review 6-review].include?(stage)
+
+      require "hive/internal_pr_checkout"
+      return [ nil, nil ] unless Hive::InternalPrCheckout.applicable?(task)
+      return [ nil, nil ] unless internal_pr_checkout_state_present?(task.folder)
+
+      snap = Hive::InternalPrCheckout.read_only_snapshot(task, config: @config) do |_s|
+        fresh_marker = if task.respond_to?(:state_file) && File.file?(task.state_file.to_s)
+          Hive::Markers.current(task.state_file)
+        else
+          caller_marker
+        end
+        fresh_projection = load_projection(fresh_marker)
+        [ fresh_marker, fresh_projection ]
+      end
+      apply_internal_pr_snapshot(snap, caller_marker, caller_projection, use_sampled_value: true)
+    rescue StandardError
+      [ caller_marker, caller_projection ]
+    end
+
+    def apply_internal_pr_snapshot(snap, caller_marker, caller_projection, use_sampled_value:)
+      if snap.busy?
+        @internal_pr_busy = true
+        return [ nil, nil ]
+      end
+      if snap.blocked?
+        @internal_pr_reconciliation = snap.to_reconciliation_result(task: task)
+        return [ nil, nil ]
+      end
+      if use_sampled_value && snap.coherent? && snap.sampled_value
+        return snap.sampled_value
+      end
+
+      [ caller_marker, caller_projection ]
+    end
+
+    def internal_pr_checkout_state_present?(folder)
+      path = folder.to_s
+      return false if path.empty?
+
+      [
+        File.join(path, "pr.md"),
+        File.join(path, "worktree.yml"),
+        Hive::InternalPrCheckout::Identity.store_dir(path)
+      ].any? { |candidate| File.exist?(candidate) || File.symlink?(candidate) }
+    end
+
+    def internal_pr_reconciliation_diagnostic
+      rec = @internal_pr_reconciliation
+      summary = "Internal PR checkout blocked (#{rec.reason})"[0, 120]
+      {
+        "summary" => summary,
+        "detail" => rec.guidance.to_s[0, 4_000],
+        "source" => "marker",
+        "source_path" => nil,
+        "artifact_paths" => [],
+        "generated_by" => "local",
+        "marker_signature" => Hive::TaskAction.marker_signature(marker),
+        "suggested_next_action" => nil,
+        "updated_at" => @clock.call.utc.iso8601
+      }
+    end
 
     # The diagnostics concern lives in the Diagnostic collaborator; it's a
     # pure function of (task, marker) plus the classification context the

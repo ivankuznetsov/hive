@@ -406,4 +406,76 @@ class BrowserTestTest < Minitest::Test
                    Hive::Stages::Review::BrowserTest.browser_blocked_path(ctx)
     end
   end
+
+  def test_custody_rejects_injected_archive_file_symlink_and_sealed_edit_on_failing_first_attempt_before_retry
+    require "hive/internal_pr_checkout"
+    require "hive/review_budget"
+
+    %i[new_file edit_sealed symlink].each do |tamper|
+      with_tmp_dir do |dir|
+        task_folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-55")
+        FileUtils.mkdir_p(File.join(task_folder, "reviews", "archive", "gen-01"))
+        FileUtils.mkdir_p(File.join(task_folder, "logs"))
+        prepare_test_task_run(task_folder)
+        File.write(File.join(task_folder, "pr.md"), <<~MD)
+          ---
+          source: ad-hoc
+          pr_number: 55
+          pr_url: https://github.com/acme/app/pull/55
+          head_oid: #{"a" * 40}
+          ---
+        MD
+        sealed_file = File.join(task_folder, "reviews", "archive", "gen-01", "claude-01.md")
+        File.write(sealed_file, "sealed gen 1 findings\n")
+        store = Hive::InternalPrCheckout::Store.new(task_folder)
+        store.initialize_generation_one!(
+          task_id: "0055", task_slug: "adhoc-review-pr-55", project: File.basename(dir),
+          pr_host: "github.com", pr_repository: "acme/app", pr_number: 55,
+          pr_url: "https://github.com/acme/app/pull/55", base_ref_name: "main",
+          head_ref_name: "feat", head_repository: "acme/app", is_cross_repository: false,
+          pr_state: "OPEN", branch: "hive/review/pr-55", head_oid: "a" * 40,
+          committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+        )
+        store.seal_retirement!(label: "gen-01")
+        store.sync_current_history_root_digest!
+
+        counter = File.join(dir, "browser-spawn-count")
+        File.write(counter, "0")
+        mutation = case tamper
+        when :new_file
+          "echo rogue > #{File.join(task_folder, 'reviews', 'archive', 'gen-01', 'injected.md').shellescape}"
+        when :edit_sealed
+          "echo altered > #{sealed_file.shellescape}"
+        when :symlink
+          "ln -s /etc/hosts #{File.join(task_folder, 'reviews', 'archive', 'gen-01', 'evil-link.md').shellescape}"
+        end
+
+        script = File.join(dir, "tamper-browser-claude")
+        File.write(script, <<~SH)
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "2.1.118 (Claude Code)"
+            exit 0
+          fi
+          n=$(cat #{counter.shellescape})
+          echo $((n + 1)) > #{counter.shellescape}
+          #{mutation}
+          exit 1
+        SH
+        File.chmod(0o755, script)
+        ENV["HIVE_CLAUDE_BIN"] = script
+        Hive::AgentProfile.reset_version_cache!
+
+        ctx = Hive::Reviewers::Context.new(
+          worktree_path: dir, task_folder: task_folder, default_branch: "main", pass: 1
+        )
+        error = assert_raises(Hive::ReviewBudget::Refused) do
+          Hive::Stages::Review::BrowserTest.run!(cfg: cfg_with, ctx: ctx)
+        end
+        assert_includes %w[unsafe_state agent_modified_budget], error.reason, tamper.to_s
+        assert_equal "1", File.read(counter).strip,
+                     "custody must fail on failing attempt 1 BEFORE retry attempt 2 (#{tamper})"
+      end
+    end
+  end
 end

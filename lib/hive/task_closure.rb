@@ -257,6 +257,30 @@ module Hive
       # task worktree; late-stage tasks whose worktree was removed may use the
       # controller-observed immutable binding persisted in pr.md.
       def local_pr_head_binding(task, frontmatter:, project_root: task.project_root)
+        require "hive/internal_pr_checkout"
+        if Hive::InternalPrCheckout.applicable?(task, allow_any_stage: true)
+          snap = Hive::InternalPrCheckout.read_only_snapshot(task, allow_any_stage: true)
+          return nil unless snap.coherent?
+
+          begin
+            pointer = Hive::Worktree.read_owned_pointer(
+              task.folder,
+              project_root: project_root,
+              slug: task.slug,
+              expected_root: snap.identity.expected_root,
+              expected_path: snap.identity.expected_worktree_path,
+              expected_branch: snap.identity.expected_branch
+            )
+            head = Hive::GitOps.new(pointer.fetch("path")).head_sha.to_s.downcase
+            return head if head.match?(FULL_OID_RE)
+          rescue Hive::Error, KeyError, SystemCallError, IOError
+            # Worktree removed in late stage: use U2's authoritative reviewed OID.
+          end
+          return snap.reviewed_oid if snap.reviewed_oid.to_s.match?(FULL_OID_RE)
+
+          return nil
+        end
+
         begin
           pointer = Hive::Worktree.read_owned_pointer(
             task.folder,
@@ -939,12 +963,22 @@ module Hive
       pointer_path = File.join(task.folder, "worktree.yml")
       return [] unless File.file?(pointer_path)
 
-      pointer = Hive::Worktree.read_owned_pointer(
-        task.folder,
+      pointer_kwargs = {
         project_root: task.project_root,
         slug: task.slug,
         expected_root: Hive::Worktree.canonical_root(task.project_root)
-      )
+      }
+      require "hive/internal_pr_checkout"
+      if Hive::InternalPrCheckout.applicable?(task, allow_any_stage: true)
+        snap = Hive::InternalPrCheckout.read_only_snapshot(task, allow_any_stage: true)
+        unless snap.coherent?
+          return [ blocker("worktree_unverified", "internal PR checkout snapshot is not coherent (#{snap.reason})") ]
+        end
+        pointer_kwargs[:expected_root] = snap.identity.expected_root
+        pointer_kwargs[:expected_path] = snap.identity.expected_worktree_path
+        pointer_kwargs[:expected_branch] = snap.identity.expected_branch
+      end
+      pointer = Hive::Worktree.read_owned_pointer(task.folder, **pointer_kwargs)
       path = pointer.fetch("path")
       return [ blocker("worktree_missing", "owned worktree is missing") ] unless File.directory?(path)
 

@@ -4726,4 +4726,146 @@ class CommandsStatusTest < Minitest::Test
       @renamed = true
     end
   end
+
+  public
+
+  def test_status_json_and_daemon_consumer_cover_live_idle_pending_and_malformed_internal_pr_intents
+    require "hive/internal_pr_checkout"
+    require "hive/daemon/status_consumer"
+    schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    schemer = JSONSchemer.schema(schema)
+    oid_a = "a" * 40
+    oid_b = "b" * 40
+
+    with_tmp_dir do |root|
+      hive_state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), { "default_branch" => "main", "default_workflow" => "coding" }.to_yaml)
+
+      make_internal_task = lambda do |pr_number|
+        slug = Hive::InternalPrCheckout::Identity.slug_for(pr_number)
+        folder = File.join(hive_state, "stages", "6-review", slug)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "task.md"), "---\nsource: ad-hoc\n---\n\n# PR #{pr_number}\n")
+        File.write(File.join(folder, "pr.md"), <<~MD)
+          ---
+          source: ad-hoc
+          pr_number: #{pr_number}
+          pr_url: https://github.com/acme/app/pull/#{pr_number}
+          head_oid: #{oid_a}
+          base_ref_name: main
+          head_ref_name: feat
+          head_repository: acme/app
+          is_cross_repository: false
+          pr_state: OPEN
+          ---
+        MD
+        store = Hive::InternalPrCheckout::Store.new(folder)
+        store.initialize_generation_one!(
+          task_id: format("%04d", pr_number), task_slug: slug, project: "app",
+          pr_host: "github.com", pr_repository: "acme/app", pr_number: pr_number,
+          pr_url: "https://github.com/acme/app/pull/#{pr_number}",
+          base_ref_name: "main", head_ref_name: "feat", head_repository: "acme/app",
+          is_cross_repository: false, pr_state: "OPEN",
+          branch: Hive::InternalPrCheckout::Identity.branch_for(pr_number),
+          head_oid: oid_a, committed_at: Time.utc(2026, 8, 29, 12, 0, 0)
+        )
+        [ folder, store, slug ]
+      end
+
+      # (a) Owned live replay -> agent_running
+      live_folder, live_store, live_slug = make_internal_task.call(101)
+      live_store.write_pending!(
+        "schema" => Hive::InternalPrCheckout::Store::PENDING_SCHEMA,
+        "schema_version" => 1,
+        "transaction_id" => "tx-live-101", "phase" => "prepared", "final_confirmed" => false,
+        "task_id" => "0101", "task_slug" => live_slug, "project" => "app",
+        "pr_host" => "github.com", "pr_repository" => "acme/app", "pr_number" => 101,
+        "pr_url" => "https://github.com/acme/app/pull/101", "branch" => "hive/review/pr-101",
+        "worktree_path" => File.join(root, "wt", live_slug),
+        "old_generation" => 1, "after_generation" => 2,
+        "old_reviewed_oid" => oid_a, "old_candidate_oid" => oid_a, "target_oid" => oid_b,
+        "quarantine_ref" => Hive::InternalPrCheckout::Identity.quarantine_ref_for("tx-live-101"),
+        "candidate_archive_ref" => nil,
+        "retirement_label" => Hive::InternalPrCheckout::Identity.retirement_label_for(transaction_id: "tx-live-101", target_oid: oid_b),
+        "remote_fingerprint" => "f" * 64, "created_at" => "2026-08-29T12:01:00Z"
+      )
+      publish_test_task_lease(
+        live_folder,
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "lock_id" => "live-internal-pr-101"
+      )
+
+      # (b) Idle valid pending -> action: error, admission_error: nil, reconciliation: transition_interrupted
+      _pending_folder, pending_store, pending_slug = make_internal_task.call(102)
+      pending_store.write_pending!(
+        "schema" => Hive::InternalPrCheckout::Store::PENDING_SCHEMA,
+        "schema_version" => 1,
+        "transaction_id" => "tx-pending-102", "phase" => "prepared", "final_confirmed" => false,
+        "task_id" => "0102", "task_slug" => pending_slug, "project" => "app",
+        "pr_host" => "github.com", "pr_repository" => "acme/app", "pr_number" => 102,
+        "pr_url" => "https://github.com/acme/app/pull/102", "branch" => "hive/review/pr-102",
+        "worktree_path" => File.join(root, "wt", pending_slug),
+        "old_generation" => 1, "after_generation" => 2,
+        "old_reviewed_oid" => oid_a, "old_candidate_oid" => oid_a, "target_oid" => oid_b,
+        "quarantine_ref" => Hive::InternalPrCheckout::Identity.quarantine_ref_for("tx-pending-102"),
+        "candidate_archive_ref" => nil,
+        "retirement_label" => Hive::InternalPrCheckout::Identity.retirement_label_for(transaction_id: "tx-pending-102", target_oid: oid_b),
+        "remote_fingerprint" => "f" * 64, "created_at" => "2026-08-29T12:01:00Z"
+      )
+
+      # (c) Idle malformed pending -> action: error, admission_error: nil, reconciliation: pending_invalid
+      _bad_folder, bad_store, bad_slug = make_internal_task.call(103)
+      File.write(bad_store.pending_path, "{corrupt json\n")
+
+      project = { "name" => "app", "path" => root, "hive_state_path" => hive_state }
+      status_cmd = Hive::Commands::Status.new(json: true)
+      payload = status_cmd.send(:json_payload, [ project ])
+
+      errors = schemer.validate(payload).to_a
+      assert_empty errors, "hive-status.v9.json must validate live/pending/malformed internal PR rows: #{errors.inspect}"
+
+      tasks_by_slug = payload.fetch("projects").first.fetch("tasks").each_with_object({}) { |t, h| h[t["slug"]] = t }
+      live_doc = tasks_by_slug.fetch(live_slug)
+      assert_equal "agent_running", live_doc["action"]
+      assert_nil live_doc["admission_error"]
+      assert_nil live_doc["reconciliation"]
+
+      pending_doc = tasks_by_slug.fetch(pending_slug)
+      assert_equal "error", pending_doc["action"]
+      assert_nil pending_doc["suggested_command"]
+      assert_nil pending_doc["admission_error"]
+      assert_equal "blocked", pending_doc.dig("reconciliation", "status")
+      assert_equal "transition_interrupted", pending_doc.dig("reconciliation", "reason")
+      assert_equal true, pending_doc.dig("reconciliation", "retryable")
+      assert_includes pending_doc.dig("diagnostic", "summary").to_s, "transition_interrupted"
+
+      bad_doc = tasks_by_slug.fetch(bad_slug)
+      assert_equal "error", bad_doc["action"]
+      assert_nil bad_doc["suggested_command"]
+      assert_nil bad_doc["admission_error"]
+      assert_equal "blocked", bad_doc.dig("reconciliation", "status")
+      assert_equal "pending_invalid", bad_doc.dig("reconciliation", "reason")
+      assert_equal false, bad_doc.dig("reconciliation", "retryable")
+
+      # StatusConsumer preserves action/guidance/reconciliation and NEVER substitutes dependency remediation.
+      consumer = Hive::Daemon::StatusConsumer.new(producer: ->(**) { payload })
+      consumed = consumer.fetch
+      assert consumed.ok, consumed.error
+      rows = consumed.rows.each_with_object({}) { |r, h| h[r.slug] = r }
+
+      assert_equal "agent_running", rows.fetch(live_slug).action
+      assert_nil rows.fetch(live_slug).admission_error
+
+      assert_equal "error", rows.fetch(pending_slug).action
+      assert_nil rows.fetch(pending_slug).admission_error
+      assert_equal "transition_interrupted", rows.fetch(pending_slug).reconciliation.fetch("reason")
+      assert_includes rows.fetch(pending_slug).diagnostic.fetch("detail"), "reopen PR #102"
+
+      assert_equal "error", rows.fetch(bad_slug).action
+      assert_nil rows.fetch(bad_slug).admission_error
+      assert_equal "pending_invalid", rows.fetch(bad_slug).reconciliation.fetch("reason")
+    end
+  end
 end

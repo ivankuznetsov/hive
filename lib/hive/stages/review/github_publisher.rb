@@ -14,6 +14,11 @@ module Hive
         module_function
 
         def publish!(task, pass:, reviewer_name:, body_path:, cfg:)
+          # U6.5: Internal PR reviews are local-only; never post comments to a
+          # borrowed PR even when review.github_publish or review.adhoc.fix is enabled.
+          require "hive/internal_pr_checkout"
+          return :not_applicable if Hive::InternalPrCheckout.applicable?(task)
+
           return :disabled unless enabled?(cfg)
           return :missing_body unless File.exist?(body_path)
 
@@ -99,6 +104,11 @@ module Hive
         # Agent-authored or subsequently tampered pr.md URLs therefore remain
         # inert instead of becoming `gh pr view/comment <arbitrary-url>`.
         def validated_pr_url(task, cfg)
+          require "hive/internal_pr_checkout"
+          if Hive::InternalPrCheckout.applicable?(task)
+            return validated_internal_pr_url(task, cfg)
+          end
+
           path, frontmatter = if block_given?
             yield
           else
@@ -143,6 +153,69 @@ module Hive
           parsed.fetch("url")
         rescue Hive::GhError, Hive::WorktreeError, SystemCallError, IOError => e
           warn "hive: review GitHub publish skipped; pull-request identity could not be proven (#{e.class}: #{e.message})"
+          nil
+        end
+
+        # Read-only canonical PR target proof for U2-applicable internal PR
+        # reviews (U6.5). Validates U2's owned `hive/review/pr-N` branch plus
+        # canonical provider repository, number, URL, source/fork identity, and
+        # full head OID. A different `headRefName` on the PR (or fork branch) is
+        # valid. Never used to derive a push ref.
+        def validated_internal_pr_url(task, cfg)
+          snap = Hive::InternalPrCheckout.read_only_snapshot(task, config: cfg)
+          unless snap.coherent?
+            warn "hive: internal PR target proof failed (#{snap.reason}): #{snap.guidance}"
+            return nil
+          end
+
+          id = snap.identity
+          pointer = Hive::Worktree.read_owned_pointer(
+            task.folder,
+            project_root: task.project_root,
+            slug: task.slug,
+            expected_root: id.expected_root,
+            expected_path: id.expected_worktree_path,
+            expected_branch: id.expected_branch
+          )
+          worktree_path = pointer.fetch("path")
+          repo_identity = Hive::Gh.repository_identity(worktree_path, cfg: cfg)
+          unless id.pr_host == repo_identity.fetch("host").downcase &&
+                 id.pr_repository == repo_identity.fetch("repository").downcase
+            warn "hive: internal PR target proof skipped; pr_url is outside the task repository"
+            return nil
+          end
+
+          meta = Hive::Gh.validated_pr_metadata(
+            id.pr_number,
+            expected_host: id.pr_host,
+            expected_repository: id.pr_repository,
+            cfg: cfg,
+            chdir: worktree_path
+          )
+          unless meta.state.to_s.upcase == "OPEN" &&
+                 meta.number == id.pr_number &&
+                 meta.url == id.pr_url &&
+                 meta.head_ref_oid.to_s.downcase == snap.reviewed_oid
+            warn "hive: internal PR target proof skipped; pull-request identity or head is stale or mismatched"
+            return nil
+          end
+
+          expected_cross = snap.current ? (snap.current["is_cross_repository"] == true) : id.is_cross_repository
+          if !expected_cross.nil? && meta.is_cross_repository != expected_cross
+            warn "hive: internal PR target proof skipped; pull-request fork/source identity changed"
+            return nil
+          end
+
+          expected_head_repo = snap.current&.dig("head_repository") || id.head_repository
+          if expected_head_repo && !meta.head_repository.to_s.empty? &&
+             meta.head_repository.to_s.downcase != expected_head_repo.to_s.downcase
+            warn "hive: internal PR target proof skipped; pull-request head repository changed"
+            return nil
+          end
+
+          id.pr_url
+        rescue Hive::GhError, Hive::WorktreeError, Hive::InternalPrCheckout::Error, SystemCallError, IOError => e
+          warn "hive: internal PR target proof failed (#{e.class}: #{e.message})"
           nil
         end
 

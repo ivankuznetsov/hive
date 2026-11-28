@@ -141,12 +141,18 @@ module Hive
             status_mode: :output_file_exists,
             mcp_scope: "review.browser_test"
           }
-          spawn_result =
+          require "hive/review_budget"
+          review_budget = Hive::ReviewBudget.new(task: task, project: "")
+          budget_custody = review_budget.capture_custody
+          spawn_result = begin
             if Hive::AgentSupport.supports?(profile, :Launch)
               Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)
             end
+          ensure
+            review_budget.verify_custody!(budget_custody) if budget_custody
+          end
 
           if spawn_result[:status] != :ok
             return {

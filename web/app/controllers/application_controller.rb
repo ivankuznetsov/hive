@@ -83,7 +83,10 @@ class ApplicationController < ActionController::Base
     # old sessions alive with repo-scoped credentials. The dev/test seam
     # signs in arbitrary logins, so it is exempt only where real GitHub auth
     # is (local envs).
-    auth = Hive::Web::GithubAuth.new(config: Hive::Config.load_global_web)
+    auth = Hive::Web::GithubAuth.new(
+      config: Hive::Config.load_global_web,
+      logger: GithubTransportLogger.build
+    )
     return if auth.owner?(current_login)
     return if Rails.env.local? && session[:github_token].blank?
 

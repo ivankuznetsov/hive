@@ -165,6 +165,10 @@ class SessionsController < ApplicationController
   end
 
   def github_auth
-    @github_auth ||= Hive::Web::GithubAuth.new(config: Hive::Config.load_global_web, http: http_client)
+    @github_auth ||= Hive::Web::GithubAuth.new(
+      config: Hive::Config.load_global_web,
+      http: http_client,
+      logger: GithubTransportLogger.build
+    )
   end
 end

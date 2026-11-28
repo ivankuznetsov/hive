@@ -19,7 +19,7 @@ module Hive
         executable = Hive::InvokedBinary.which(name)
         raise ProbeError, "#{name} executable not found" unless executable
 
-        Open3.popen2e({ "LC_ALL" => "C" }, [File.expand_path(executable), name], *args) do |input, output, child|
+        Open3.popen2e({ "LC_ALL" => "C" }, [ File.expand_path(executable), name ], *args) do |input, output, child|
           input.close
           begin
             Timeout.timeout(2) do
@@ -57,7 +57,7 @@ module Hive
 
       def inspect_storage
         root = inspect_path("directory", @root)
-        paths = [root]
+        paths = [ root ]
         if root[:exists] && root[:outcome] != "unsafe"
           { "database" => "", "wal" => "-wal", "shm" => "-shm", "journal" => "-journal" }.each do |role, suffix|
             paths << inspect_path(role, @path + suffix)
@@ -92,7 +92,7 @@ module Hive
         root ||= path_evidence("directory", @root)
         root[:outcome] = root[:filesystem] == "btrfs" ? "warning" : "indeterminate"
         root[:reason] = error.message
-        aggregate(evidence ? evidence[:paths] : [root])
+        aggregate(evidence ? evidence[:paths] : [ root ])
       end
 
       private
@@ -179,7 +179,7 @@ module Hive
         when "not_applicable" then "Runtime storage at #{@root} does not require Linux btrfs NOCOW."
         else messages.join(" ")
         end
-        { outcome: outcome, paths: paths, message: message, remediation: advice.uniq.join(" ") }
+        { outcome: outcome, paths: paths, message: message, remediation: advice.empty? ? nil : advice.uniq.join(" ") }
       end
     end
   end

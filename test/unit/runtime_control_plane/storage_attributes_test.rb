@@ -12,7 +12,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
     @calls = []
     @flags = Hash.new("---------------C------")
     @runner = lambda do |name, *args|
-      @calls << [name, *args]
+      @calls << [ name, *args ]
       case name
       when "stat" then "9123683e btrfs\n"
       when "lsattr" then "#{@flags[args.last]} #{args.last}\n"
@@ -29,14 +29,14 @@ class RuntimeStorageAttributesTest < Minitest::Test
   end
 
   def test_inspect_identifies_each_mismatch_without_writing
-    paths = [@root, @path] + %w[-wal -shm -journal].map { |suffix| @path + suffix }
+    paths = [ @root, @path ] + %w[-wal -shm -journal].map { |suffix| @path + suffix }
     paths.drop(1).each { |p| File.write(p, "") }
     assert_equal "healthy", storage.inspect_storage[:outcome]
     paths.each do |path|
       @flags[path] = "----------------------"
       result = storage.inspect_storage
       assert_equal "warning", result[:outcome]
-      assert_equal [path], result[:paths].select { |r| r[:outcome] == "warning" }.map { |r| r[:path] }
+      assert_equal [ path ], result[:paths].select { |r| r[:outcome] == "warning" }.map { |r| r[:path] }
       @flags.delete(path)
     end
     assert_empty @calls.select { |name, *| name == "chattr" }
@@ -50,7 +50,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
     result = storage(path: File.join(@root, "absent", "db")).inspect_storage
     assert_equal "uninitialized", result[:outcome]
     assert_empty @calls
-    assert_equal ["custom db-shm"], Dir.children(@root)
+    assert_equal [ "custom db-shm" ], Dir.children(@root)
   end
 
   def test_non_linux_and_known_non_btrfs_skip_attributes
@@ -60,7 +60,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
   end
 
   def test_missing_evidence_is_indeterminate_and_never_authorizes_mutation
-    ["", "junk", "9123683e tmpfs", Errno::EACCES.new, Errno::ENOENT.new, Timeout::Error.new].each do |failure|
+    [ "", "junk", "9123683e tmpfs", Errno::EACCES.new, Errno::ENOENT.new, Timeout::Error.new ].each do |failure|
       runner = lambda do |name, *|
         assert_equal "stat", name
         raise failure if failure.is_a?(Exception)
@@ -70,7 +70,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
       assert_equal "indeterminate", result[:outcome]
       assert_includes result[:message], "stat"
     end
-    ["", "C", "---------------------- wrong-path", "garbage #{@root}"].each do |bad|
+    [ "", "C", "---------------------- wrong-path", "garbage #{@root}" ].each do |bad|
       runner = ->(cmd, *args) { cmd == "lsattr" ? bad : @runner.call(cmd, *args) }
       assert_equal "indeterminate", storage(runner: runner).inspect_storage[:outcome]
     end
@@ -110,7 +110,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
     assert_equal "healthy", storage.prepare[:outcome]
     assert_equal 0o700, File.stat(@root).mode & 0o777
     assert_equal "healthy", storage.prepare[:outcome]
-    assert_equal [["chattr", "+C", @root]], @calls.select { |cmd, *| cmd == "chattr" }
+    assert_equal [ [ "chattr", "+C", @root ] ], @calls.select { |cmd, *| cmd == "chattr" }
     @flags[@root] = "----------------------"
     runner = ->(cmd, *args) { cmd == "chattr" ? "" : @runner.call(cmd, *args) }
     result = storage(runner: runner).prepare
@@ -140,7 +140,7 @@ class RuntimeStorageAttributesTest < Minitest::Test
     alias_path = @root + "-alias"
     File.symlink(@root, alias_path)
     @calls.clear
-    [alias_path, @path].each do |unsafe|
+    [ alias_path, @path ].each do |unsafe|
       subject = storage(path: File.join(unsafe, "db"))
       assert_equal "indeterminate", subject.inspect_storage[:outcome]
       assert_equal "indeterminate", subject.prepare[:outcome]

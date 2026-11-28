@@ -95,9 +95,20 @@ module Hive
         receipts.merge("record_path" => path, "record" => nil, "record_error" => "#{error.class}: #{error.message}")
       end
 
-      def status(state_home: Hive::Paths.state_home)
+      def status(state_home: Hive::Paths.state_home, non_creating: false)
         database = Database.new(path: Hive::Paths.runtime_control_plane_path(state_home))
-        diagnosis = database.diagnostics
+        return database_status(database) unless non_creating
+
+        database.with_inspection_snapshot do |snapshot, diagnosis|
+          result = database_status(snapshot, diagnosis || snapshot.diagnostics)
+          result.fetch("database")["path"] = database.path
+          result
+        end
+      ensure
+        database&.disconnect
+      end
+
+      def database_status(database, diagnosis = database.diagnostics)
         raise diagnosis.error if diagnosis.error
         identity = database.installation_identity if diagnosis.ok?
         snapshot = database.quiescence_status_snapshot if diagnosis.ok?
@@ -110,9 +121,8 @@ module Hive
           "next_action" => diagnosis.ok? ? nil : "hive setup",
           "lifecycle" => lifecycle_status(snapshot && snapshot[:lifecycle]),
           "database" => Codec.normalize(diagnosis.to_h) }
-      ensure
-        database&.disconnect
       end
+      private_class_method :database_status
 
       # Payload paths resolve under the payload root exactly as the store would
       # join them; they are reported, not validated, so an auditor can check

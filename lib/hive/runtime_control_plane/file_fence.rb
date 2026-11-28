@@ -43,6 +43,36 @@ module Hive
         release! if acquired_here && acquired?
       end
 
+      # A fresh installation may never have had a writer. All writers create
+      # this permanent inode before admission, so its appearance invalidates a
+      # copy made while it was absent.
+      def observe_exclusively
+        handle = begin
+          File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK)
+        rescue Errno::ENOENT
+          nil
+        end
+        if handle
+          validate_binding!(handle)
+          raise Busy, "#{@label} is busy" unless handle.flock(File::LOCK_EX | File::LOCK_NB)
+          validate_binding!(handle)
+        end
+        result = yield
+        if handle
+          validate_binding!(handle)
+        else
+          begin
+            File.lstat(path)
+            raise Busy, "#{@label} appeared during inspection"
+          rescue Errno::ENOENT
+            # Still no writer.
+          end
+        end
+        result
+      ensure
+        handle&.close
+      end
+
       def release!
         handle = @handle
         return false unless handle

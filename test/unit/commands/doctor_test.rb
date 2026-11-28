@@ -464,6 +464,7 @@ class HiveCommandsDoctorTest < Minitest::Test
 
   def test_claude_config_is_silent_without_claude_mode_key
     with_fake_home do |home|
+      FileUtils.mkdir_p(Hive::Paths.state_home)
       exit_code, env = doctor_json_for_project_config(home, PARKED_STAGE_YAML)
 
       assert_equal 0, exit_code

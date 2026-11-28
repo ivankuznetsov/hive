@@ -1110,9 +1110,16 @@ The cleanup cases also pin the namespaced
 `HIVE_E2E_RUNS_RETAIN_DAYS` / `HIVE_E2E_RUNS_RETAIN_FAILED_DAYS`
 defaults and prove the old generic environment names no longer affect deletion.
 
+Run `bin/test test/unit/release_documentation_test.rb` to check current release
+references in `README.md`, `wiki/operating.md`, `wiki/testing.md`, and
+`wiki/active-areas.md` against `Hive::VERSION`. This read-only test runs offline.
+Fixtures use a synthetic version to check complete installer URLs and verifier
+arguments, missing examples, and the current release claim in the inventory.
+
 The install-smoke workflow's `verify-release.sh (end-to-end behavior)` job
 runs `packaging/verify-release.sh --version=v0.1.0` against the published
-release after the pinned-release existence gate. The script itself requires
+release after the pinned-release existence gate. This pin is an intentional
+historical test baseline in `.github/workflows/install-smoke.yml`. The script itself requires
 `jq` for envelope assertions; CI first uses runner-provided `jq` when present
 and only falls back to apt provisioning when missing. If that fallback's
 `apt-get update` is blocked by transient `packages.microsoft.com` repository

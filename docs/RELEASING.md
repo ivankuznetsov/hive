@@ -278,8 +278,11 @@ big versions.
 **How to cut a release:** bump `VERSION` in `lib/hive/version.rb`, sync **both**
 `Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — Hive web
 depends on the gem via `path: ".."` in a source checkout, so a stale web lock fails its frozen
-`bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
-`install.md`, add a `## X.Y.Z` CHANGELOG section, and merge the release-prep PR.
+`bundle install`), update the `vX.Y.Z` installer URLs in `README.md`,
+`install.md`, and `wiki/operating.md`, update both verifier examples in
+`wiki/operating.md` and the current release claim in `wiki/active-areas.md`,
+add a `## X.Y.Z` CHANGELOG section, run
+`bin/test test/unit/release_documentation_test.rb`, and merge the release-prep PR.
 Only a separate explicit release decision should create/push `vX.Y.Z` on the
 full protected-main commit, after trusted pre-tag candidate evidence is
 `qa_ready`. The tag selects and republishes those exact bytes; it does not

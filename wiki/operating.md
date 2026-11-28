@@ -237,7 +237,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.5.3/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.8.0/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -428,6 +428,10 @@ URL is announced.
 
 ## Release verification
 
+Release PRs update `Hive::VERSION` and the hand-edited installer URLs,
+verifier examples, and current release claim together. These references can name
+the upcoming tag before publication. The documentation test checks them offline.
+
 The release ceremony exercises the published artifact end-to-end via
 [`packaging/verify-release.sh`](../packaging/verify-release.sh). The
 script installs a published release into an isolated XDG/HIVE_HOME/HOME
@@ -451,8 +455,8 @@ not a release prerequisite.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.5.3
-packaging/verify-release.sh --version=v0.5.3 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.8.0
+packaging/verify-release.sh --version=v0.8.0 --report=json | jq .ok
 ```
 
 For unreleased packaging fixes, validate against the locally built gem rather
